@@ -59,3 +59,9 @@ export {
   stepSim,
   warpPlayers,
 } from './step';
+export { updateJeffPhysics, probeJeffWallForGrab } from './jeffPhysics';
+export { computeAiBuddyInput } from './aiBuddy';
+export { updateCircuits } from './circuits';
+export { breakBossChain, updateBoss } from './boss';
+export { gradeTimeTrialMedal, resolveBiomeAt } from './modes';
+export { evaluateSaveAchievements, updateProgression } from './progression';

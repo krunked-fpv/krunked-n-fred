@@ -1,9 +1,6 @@
 import {
-  createEmptyPlayerInput,
   PHYSICS,
-  WORLD,
   type AssistSettings,
-  type BiomeId,
   type BossState,
   type CreateSimOptions,
   type InputFrame,
@@ -20,8 +17,11 @@ import {
   updateEmotes,
   updatePenguinAction,
 } from './actions';
+import { computeAiBuddyInput } from './aiBuddy';
 import { createCameraState, updateCamera } from './camera';
 import { hashSimState } from './hash';
+import { updateJeffPhysics } from './jeffPhysics';
+import { resolveBiomeAt } from './modes';
 import {
   carryRiders,
   createJeffState,
@@ -29,7 +29,6 @@ import {
   integratePenguin,
   refreshPostTetherGrounding,
   resetScarfNodes,
-  updateJeff,
   updateScarf,
 } from './penguinPhysics';
 import { normalizeSeed } from './prng';
@@ -55,28 +54,6 @@ function hasAnyAssistEnabled(assist: AssistSettings): boolean {
     assist.checkPoints ||
     assist.betterGrab
   );
-}
-
-function computeBiome(level: LevelData, x: number, y: number): BiomeId {
-  if (level.mode === 'lab_dlc') {
-    if (level.bossArena && y >= level.bossArena.minY) {
-      return 'boss';
-    }
-    return 'lab';
-  }
-  if (y < 8 && x <= 3) {
-    return 'village';
-  }
-  if (y < WORLD.ZONE2_START_Y) {
-    return 'foothills';
-  }
-  if (y < WORLD.ZONE3_START_Y) {
-    return 'mines';
-  }
-  if (y < WORLD.ZONE4_START_Y) {
-    return 'crags';
-  }
-  return 'summit';
 }
 
 function sampleWindFallback(state: SimState, x: number, y: number): WindSample {
@@ -118,42 +95,6 @@ function isPlayerInputEmpty(inp: PlayerInput): boolean {
     !inp.callCharlie &&
     inp.emote === 'none'
   );
-}
-
-/**
- * Lightweight deterministic AI companion controller for `solo_ai` mode when P2 has no manual input.
- */
-function computeAiBuddyInput(state: SimState): PlayerInput {
-  const out = createEmptyPlayerInput();
-  const p1 = state.p1;
-  const p2 = state.p2;
-  const dx = p1.x - p2.x;
-  const dy = p1.y - p2.y;
-  const dist = Math.hypot(dx, dy);
-
-  // If P1 is dangling below P2 on a taut rope, anchor cleanly so P1 can swing!
-  if (!p1.grounded && p1.action !== 'Grab' && p2.grounded && dy < -0.6 && dist > 1.8) {
-    out.anchor = true;
-    return out;
-  }
-
-  // Follow P1 horizontally once more than 1.0 u away
-  if (Math.abs(dx) > 1.05) {
-    out.moveX = dx > 0 ? 1 : -1;
-  }
-
-  // Hop up when P1 is above P2 and P2 is grounded
-  if (p2.grounded && dy > 0.75 && p2.jumpCooldown <= 0) {
-    out.jump = true;
-    out.jumpPressed = true;
-  }
-
-  // Grab wall if falling fast near one
-  if (!p2.grounded && p2.vy < -4.0 && p2.grabStamina > 2.0) {
-    out.grab = true;
-  }
-
-  return out;
 }
 
 function createInitialBossState(level: LevelData): BossState {
@@ -239,7 +180,7 @@ export function createSimState(level: LevelData, options?: CreateSimOptions): Si
     maxAltitude: startAlt,
     fallsCount: 0,
     jumpsCount: 0,
-    currentBiome: computeBiome(level, midX, midY),
+    currentBiome: resolveBiomeAt(level, midY, midX),
     windActive: false,
     windDir: 1,
     windPhase: 'wait',
@@ -440,7 +381,7 @@ export function stepSim(
   const p1Input = input.p1;
   const p2Input =
     state.aiBuddyEnabled && state.mode !== 'solo_jeff' && isPlayerInputEmpty(input.p2)
-      ? computeAiBuddyInput(state)
+      ? computeAiBuddyInput(state, level)
       : input.p2;
 
   updateCheckpointAndCharlie(state, p1Input, p2Input, dt);
@@ -472,7 +413,8 @@ export function stepSim(
     integratePenguin(state, level, state.p1, wind1, dt);
     if (state.mode === 'solo_jeff' && state.jeff.active) {
       const windJeff = sampleWind(state, hooks, state.jeff.x, state.jeff.y);
-      updateJeff(state, level, p1Input, windJeff, dt);
+      const windForceX = windJeff.active ? windJeff.dir * windJeff.strength : 0;
+      updateJeffPhysics(state, level, p1Input, windForceX, dt);
       // Keep inactive P2 parked alongside Jeff for any UI/camera safety
       state.p2.x = state.jeff.x;
       state.p2.y = state.jeff.y;
@@ -510,7 +452,7 @@ export function stepSim(
   if (state.altitude > state.maxAltitude) {
     state.maxAltitude = state.altitude;
   }
-  state.currentBiome = computeBiome(level, midX, midY);
+  state.currentBiome = resolveBiomeAt(level, midY, midX);
 
   updateCamera(state, level, dt);
   hooks?.updateProgression?.(state, level, state.events);

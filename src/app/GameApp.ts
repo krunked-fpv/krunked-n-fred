@@ -297,6 +297,10 @@ export class GameApp {
     return this.onlineCoop;
   }
 
+  setMetaArtProvider(provider: import('../ui/MetaScreens').MetaArtProvider | null): void {
+    this.menuManager.setMetaArtProvider(provider);
+  }
+
   // ---- Core App Actions ----
 
   startMode(mode: GameMode, timeTrialIndex?: number, seedOverride?: number): void {
