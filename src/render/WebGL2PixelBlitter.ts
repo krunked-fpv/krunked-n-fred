@@ -83,9 +83,13 @@ export class WebGL2PixelBlitter {
     offCtx.imageSmoothingEnabled = false;
     this.offscreenCtx = offCtx;
 
-    // 2. Display canvas mounted into container
+    // 2. Display canvas mounted into container (position absolute so it never inflates flex container)
     this.displayCanvas = document.createElement('canvas');
     this.displayCanvas.id = 'game-canvas';
+    this.displayCanvas.style.position = 'absolute';
+    this.displayCanvas.style.inset = '0';
+    this.displayCanvas.style.width = '100%';
+    this.displayCanvas.style.height = '100%';
     this.displayCanvas.style.display = 'block';
     this.displayCanvas.style.background = PALETTE.SKY_DEEP;
     this.displayCanvas.style.imageRendering = 'pixelated';
@@ -129,8 +133,6 @@ export class WebGL2PixelBlitter {
 
     this.cssWidth = safeW;
     this.cssHeight = safeH;
-    this.displayCanvas.style.width = `${safeW}px`;
-    this.displayCanvas.style.height = `${safeH}px`;
     if (this.displayCanvas.width !== physW || this.displayCanvas.height !== physH) {
       this.displayCanvas.width = physW;
       this.displayCanvas.height = physH;

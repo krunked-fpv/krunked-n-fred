@@ -148,14 +148,14 @@ export class KeyboardDriver {
     const p1Right = this.held.has(kb.p1Right);
     const p1Up = this.held.has(kb.p1Up);
     const p1Down = this.held.has(kb.p1Down);
-    const p1JumpHeld = this.held.has(kb.p1Jump);
+    const p1JumpHeld = this.held.has(kb.p1Jump) || p1Up;
 
     p1.moveX = (p1Right ? 1 : 0) - (p1Left ? 1 : 0);
     p1.moveY = (p1Up ? 1 : 0) - (p1Down ? 1 : 0);
     p1.jump = p1JumpHeld || this.p1JumpQueued;
     p1.jumpPressed = this.p1JumpQueued;
     p1.grab = this.grabToggleMode ? this.p1GrabLatched : this.held.has(kb.p1Grab);
-    p1.anchor = this.held.has(kb.p1Anchor);
+    p1.anchor = this.held.has(kb.p1Anchor) || p1Down;
     p1.pull = this.held.has(kb.p1Pull);
     p1.flag = this.held.has(kb.flag) || this.flagQueued;
     p1.callCharlie = this.held.has(kb.charlie);
@@ -166,14 +166,14 @@ export class KeyboardDriver {
     const p2Right = this.held.has(kb.p2Right);
     const p2Up = this.held.has(kb.p2Up);
     const p2Down = this.held.has(kb.p2Down);
-    const p2JumpHeld = this.held.has(kb.p2Jump);
+    const p2JumpHeld = this.held.has(kb.p2Jump) || p2Up;
 
     p2.moveX = (p2Right ? 1 : 0) - (p2Left ? 1 : 0);
     p2.moveY = (p2Up ? 1 : 0) - (p2Down ? 1 : 0);
     p2.jump = p2JumpHeld || this.p2JumpQueued;
     p2.jumpPressed = this.p2JumpQueued;
     p2.grab = this.grabToggleMode ? this.p2GrabLatched : this.held.has(kb.p2Grab);
-    p2.anchor = this.held.has(kb.p2Anchor);
+    p2.anchor = this.held.has(kb.p2Anchor) || p2Down;
     p2.pull = this.held.has(kb.p2Pull);
     p2.flag = false;
     p2.callCharlie = false;
@@ -231,10 +231,10 @@ export class KeyboardDriver {
 
     // Gameplay edge-triggered actions (ignoring OS key repeat)
     if (!wasHeld && !e.repeat) {
-      if (code === kb.p1Jump) {
+      if (code === kb.p1Jump || code === kb.p1Up) {
         this.p1JumpQueued = true;
       }
-      if (code === kb.p2Jump) {
+      if (code === kb.p2Jump || code === kb.p2Up) {
         this.p2JumpQueued = true;
       }
       if (this.grabToggleMode) {

@@ -1106,22 +1106,24 @@ function bakeAutoTile(
   const hasW = (mask & 8) !== 0;
 
   if (group === 'snow') {
-    // Rich purple-indigo alpine cliff facets with lush overhanging white snowcap!
+    // Cohesive layered alpine stone strata with smooth purple-indigo facets & pillowy white snowcaps!
     g.rect(0, 0, 16, 16, PALETTE.CLIFF_DARK);
 
-    // Angular faceted rock planes
-    g.rect(1, 2, 6, 5, PALETTE.CLIFF_MID);
-    g.rect(8, 5, 6, 5, PALETTE.CLIFF_MID);
-    g.rect(2, 10, 5, 4, PALETTE.CLIFF_MID);
-    g.rect(10, 11, 4, 3, PALETTE.BODY_DARK);
-    g.rect(0, 7, 4, 3, PALETTE.BODY_DARK);
-    g.rect(7, 1, 3, 3, PALETTE.BODY_DARK);
+    // Broad layered stone strata (avoids harsh checkerboard repetition)
+    g.rect(0, 1, 16, 4, '#4b4785');
+    g.rect(0, 6, 16, 5, PALETTE.CLIFF_DARK);
+    g.rect(0, 12, 16, 4, '#363464');
+    // Subtle angular cliff facets & seams
+    g.rect(2, 2, 7, 2, PALETTE.CLIFF_MID);
+    g.rect(10, 7, 5, 3, '#524b92');
+    g.rect(1, 8, 6, 2, PALETTE.BODY_DARK);
+    g.rect(6, 13, 8, 2, '#494580');
 
-    // Subtle rock fracture crevices
-    g.line(6, 3, 8, 5, PALETTE.BODY_DARK);
-    g.line(4, 11, 7, 13, PALETTE.OUTLINE);
-    g.set(12, 8, PALETTE.OUTLINE);
-    g.set(3, 6, PALETTE.OUTLINE);
+    // Fine horizontal bedding crevices
+    g.line(0, 5, 10, 5, PALETTE.BODY_DARK);
+    g.line(6, 11, 15, 11, PALETTE.BODY_DARK);
+    g.set(11, 4, PALETTE.OUTLINE);
+    g.set(4, 10, PALETTE.OUTLINE);
 
     // Exposed West/East cliff bevels
     if (!hasW) {

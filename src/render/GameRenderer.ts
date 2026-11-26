@@ -655,20 +655,24 @@ export class GameRenderer implements RendererModulePort {
     const exitMines = clamp((this.camY - (WORLD.ZONE3_START_Y - 6)) / 14, 0, 1);
     const minesBlend = enterMines * (1 - exitMines);
 
-    // 1. Crisp stepped alpine sky gradient (#13123a -> #2b1d41 -> #3f3f74)
+    // 1. Crisp stepped alpine twilight gradient (smooth horizon bands, no harsh mid-sky seam)
     if (minesBlend < 0.99) {
       ctx.fillStyle = PALETTE.SKY_DEEP;
-      ctx.fillRect(0, 0, W, 96);
+      ctx.fillRect(0, 0, W, 68);
+      ctx.fillStyle = '#1b1742';
+      ctx.fillRect(0, 68, W, 54);
       ctx.fillStyle = PALETTE.NIGHT_PURPLE;
-      ctx.fillRect(0, 96, W, 86);
-      ctx.fillStyle = PALETTE.CLIFF_DARK;
-      ctx.fillRect(0, 182, W, H - 182);
+      ctx.fillRect(0, 122, W, 64);
+      ctx.fillStyle = '#33285b';
+      ctx.fillRect(0, 186, W, H - 186);
 
-      // Subtle dithering seam lines between sky bands for crisp pixel-art transition
+      // Subtle 1px pixel-art dither seams between sky bands
+      ctx.fillStyle = '#1b1742';
+      for (let x = 0; x < W; x += 4) ctx.fillRect(x, 67, 2, 1);
       ctx.fillStyle = PALETTE.NIGHT_PURPLE;
-      for (let x = 0; x < W; x += 4) ctx.fillRect(x, 94, 2, 2);
-      ctx.fillStyle = PALETTE.CLIFF_DARK;
-      for (let x = 2; x < W; x += 4) ctx.fillRect(x, 180, 2, 2);
+      for (let x = 2; x < W; x += 4) ctx.fillRect(x, 121, 2, 1);
+      ctx.fillStyle = '#33285b';
+      for (let x = 0; x < W; x += 4) ctx.fillRect(x, 185, 2, 1);
 
       // High-altitude aurora shimmer above Crags/Summit
       if (this.camY > WORLD.ZONE3_START_Y - 20) {
@@ -725,10 +729,10 @@ export class GameRenderer implements RendererModulePort {
         ctx.fillRect(cx + 8, cy, c.w - 16, 4);
       }
 
-      // Distant Mountain Range Layer A (far snow-peaked ridge, parallax 0.14)
-      this.renderMountainRange(ctx, 0.14, 165, 58, 74, PALETTE.NIGHT_PURPLE, PALETTE.CLIFF_MID);
-      // Midground Mountain Range Layer B (deeper ridge, parallax 0.28)
-      this.renderMountainRange(ctx, 0.28, 204, 48, 56, PALETTE.BODY_DARK, PALETTE.SNOW_LIGHT);
+      // Distant Mountain Range Layer A (distinct twilight ridge, parallax 0.14)
+      this.renderMountainRange(ctx, 0.14, 178, 62, 78, '#231e54', '#5c52a3');
+      // Midground Mountain Range Layer B (crisp snow-crested alpine peaks, parallax 0.28)
+      this.renderMountainRange(ctx, 0.28, 214, 52, 62, '#1d193d', PALETTE.SNOW_LIGHT);
 
       // Distant pine silhouette treeline near lower Foothills/Village
       if (this.camY < 62) {
@@ -1808,8 +1812,18 @@ export class GameRenderer implements RendererModulePort {
     p2x: number,
     p2y: number
   ): void {
+    // Keep Title backdrop & immediate spawn clean until the player moves near a sign
+    if (
+      state.tick < 25 ||
+      (Math.abs(p1x - level.spawnP1.x) < 0.35 &&
+        Math.abs(p1y - level.spawnP1.y) < 0.35 &&
+        Math.abs(p2x - level.spawnP2.x) < 0.35)
+    ) {
+      return;
+    }
+
     let bestSign: SignDef | null = null;
-    let bestDist = 2.4;
+    let bestDist = 1.65;
 
     for (let i = 0; i < level.signs.length; i++) {
       const s = level.signs[i];
@@ -1824,23 +1838,24 @@ export class GameRenderer implements RendererModulePort {
 
     if (!bestSign) return;
 
-    const boxW = 166;
-    const innerW = boxW - 12;
-    const estLines = Math.max(1, Math.ceil(bestSign.text.length / Math.floor(innerW / 6)));
-    const boxH = 18 + estLines * 10 + 4;
+    // Compact bottom-center ribbon tooltip so it NEVER occludes wall-cling shafts or penguins!
+    const boxW = 248;
+    const innerW = boxW - 14;
+    const estLines = Math.max(1, Math.min(3, Math.ceil(bestSign.text.length / Math.floor(innerW / 6))));
+    const boxH = 16 + estLines * 9 + 4;
 
-    const sx = clamp(this.toScreenX(bestSign.x) - (boxW >> 1), 6, W - boxW - 6);
-    const sy = clamp(this.toScreenY(bestSign.y) - boxH - 22, 26, H - boxH - 8);
+    const sx = (W - boxW) >> 1;
+    const sy = H - boxH - 6;
 
-    drawPixelBox(ctx, sx, sy, boxW, boxH, 'rgba(19, 18, 58, 0.92)', PALETTE.OUTLINE, PALETTE.CLIFF_MID);
-    drawPixelText(ctx, bestSign.title.toUpperCase(), sx + 6, sy + 5, {
+    drawPixelBox(ctx, sx, sy, boxW, boxH, 'rgba(19, 18, 58, 0.86)', PALETTE.OUTLINE, PALETTE.CLIFF_MID);
+    drawPixelText(ctx, bestSign.title.toUpperCase(), sx + 7, sy + 4, {
       color: PALETTE.LAB_AMBER,
       outlineColor: PALETTE.OUTLINE,
     });
-    drawWrappedPixelText(ctx, bestSign.text, sx + 6, sy + 16, innerW, {
+    drawWrappedPixelText(ctx, bestSign.text, sx + 7, sy + 14, innerW, {
       color: PALETTE.SNOW_BRIGHT,
       outlineColor: PALETTE.OUTLINE,
-      lineHeight: 10,
+      lineHeight: 9,
     });
   }
 

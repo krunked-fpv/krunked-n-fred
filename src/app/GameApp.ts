@@ -665,10 +665,19 @@ export class GameApp {
   }
 
   private syncCanvasSize(): void {
+    const rect = this.container.getBoundingClientRect();
     const w =
-      this.container.clientWidth || (typeof window !== 'undefined' ? window.innerWidth : 960);
+      rect.width > 0
+        ? Math.round(rect.width)
+        : typeof window !== 'undefined'
+          ? window.innerWidth
+          : 960;
     const h =
-      this.container.clientHeight || (typeof window !== 'undefined' ? window.innerHeight : 540);
+      rect.height > 0
+        ? Math.round(rect.height)
+        : typeof window !== 'undefined'
+          ? window.innerHeight
+          : 540;
     this.deps.renderer.resize(Math.max(1, w), Math.max(1, h));
   }
 
