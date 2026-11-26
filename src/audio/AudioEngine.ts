@@ -1,19 +1,34 @@
 // ============================================================================
-// Krunked & Fred — Web Audio Engine & Dynamic Alpine/Mines Music Sequencer
+// Krunked & Fred — Web Audio Engine, 11-Track Dual-Deck Sequencer & Stingers
 // Implements AudioModulePort with lazy gesture unlock, gain bus mixing,
 // polyphony cap (16), per-event cooldowns, +/-6% pitch jitter, camera-relative
-// stereo panning, ambient wind bed, and seamless Zone 1 <-> Zone 2 music.
+// stereo panning, ambient wind bed, altitude-reactive equal-power crossfading
+// across all 11 Jukebox tracks, CustomAudioLoader integration, and crisp
+// celebratory stingers. Pure Web Audio API, zero external deps, SSR-safe.
 // ============================================================================
 
 import {
   PHYSICS,
+  WORLD,
   type AudioModulePort,
   type AudioSettings,
   type BiomeId,
   type JukeboxTrackId,
+  type MedalTier,
   type SimEvent,
   type SimState,
 } from '../contracts';
+import { CustomAudioLoader } from './CustomAudioLoader';
+import {
+  JUKEBOX_TRACK_DATA,
+  RANDOM_PLAYLIST_ORDER,
+  getBiomeDefaultTrack,
+  getDeterministicRandomTrack,
+  midiToHz,
+  type JukeboxTrackData,
+  type PercHit,
+  type PlayableTrackId,
+} from './JukeboxTracks';
 import {
   ProceduralSynth,
   type UiSoundKind,
@@ -25,6 +40,7 @@ const MAX_SFX_VOICES = 16;
 const PITCH_JITTER_RANGE = 0.06; // +/- 6%
 const LOOKAHEAD_SEC = 0.14;
 const CROSSFADE_DURATION_SEC = 1.4;
+const RANDOM_LOOPS_PER_TRACK = 2;
 const HALF_VIEW_TILES = PHYSICS.VIEWPORT_TILES_X * 0.5;
 
 const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
@@ -35,115 +51,31 @@ const DEFAULT_AUDIO_SETTINGS: AudioSettings = {
   jukeboxTrack: 'Base',
 };
 
-// ============================================================================
-// Musical Patterns — Relative Major/Minor (F Major <-> D Minor)
-// Sharing the exact same key signature (one flat: Bb) allows Zone 1 Snowy
-// Foothills and Zone 2 Dark Mines to crossfade seamlessly with zero dissonance!
-// 48-step loop in bouncy 6/8 alpine waltz feel (8 bars x 6 eighth-note steps).
-// MIDI note numbers (0 = rest).
-// ============================================================================
-
-// Zone 1: Cozy Bouncy Snowy Foothills Waltz (F Major)
-const ZONE1_LEAD: readonly number[] = [
-  // Bar 1 (F)            // Bar 2 (C)
-  77, 0, 81, 84, 0, 81,   79, 0, 76, 72, 0, 76,
-  // Bar 3 (Dm)           // Bar 4 (Bb -> C)
-  74, 0, 77, 81, 0, 77,   74, 77, 79, 76, 0, 0,
-  // Bar 5 (F)            // Bar 6 (Bb)
-  77, 0, 81, 84, 86, 84,  82, 0, 79, 74, 0, 77,
-  // Bar 7 (C7)           // Bar 8 (F resolve)
-  79, 81, 79, 76, 72, 76, 77, 0, 81, 77, 0, 0,
-];
-
-const ZONE1_SPARKLE: readonly number[] = [
-  // Gentle icy glockenspiel sparkle on dotted-quarter accents
-  89, 0, 0, 84, 0, 0,     88, 0, 0, 84, 0, 0,
-  86, 0, 0, 81, 0, 0,     82, 0, 0, 84, 0, 0,
-  89, 0, 0, 86, 0, 0,     86, 0, 0, 82, 0, 0,
-  88, 0, 0, 84, 0, 0,     89, 0, 0, 0, 0, 0,
-];
-
-const ZONE1_BASS: readonly number[] = [
-  // Bouncy alpine OOM-pa-pa (root on 0, fifth/chord on 3)
-  53, 0, 60, 57, 0, 60,   48, 0, 55, 52, 0, 55,
-  50, 0, 57, 53, 0, 57,   46, 0, 53, 48, 0, 55,
-  53, 0, 60, 57, 0, 60,   46, 0, 53, 50, 0, 53,
-  48, 0, 55, 52, 0, 55,   53, 0, 60, 53, 0, 0,
-];
-
-// Zone 2: Atmospheric Subterranean Dark Mines Pulse (D Minor / Dorian)
-const ZONE2_PULSE_BASS: readonly number[] = [
-  // Hypnotic low cavern pulse synced to the same 48-step grid
-  38, 0, 38, 45, 0, 38,   38, 0, 41, 43, 0, 40,
-  38, 0, 38, 45, 0, 41,   46, 0, 45, 43, 0, 40,
-  38, 0, 38, 45, 0, 38,   41, 0, 43, 45, 0, 41,
-  40, 0, 43, 45, 0, 43,   38, 0, 45, 38, 0, 0,
-];
-
-const ZONE2_CAVERN_ARP: readonly number[] = [
-  // Mysterious echoing crystal/water-drop motifs
-  62, 0, 0, 69, 0, 65,    0, 0, 64, 0, 0, 69,
-  62, 0, 65, 0, 72, 0,    70, 0, 0, 67, 0, 0,
-  62, 0, 0, 69, 74, 0,    72, 0, 69, 0, 65, 0,
-  64, 0, 67, 0, 70, 0,    69, 0, 0, 62, 0, 0,
-];
-
-const ZONE2_PADS: ReadonlyArray<readonly number[] | null> = [
-  [50, 57, 65], // Bar 1: Dm
-  [50, 57, 64], // Bar 2: Dm(add9)
-  [50, 53, 60], // Bar 3: Dm7
-  [46, 53, 62], // Bar 4: Bbmaj7
-  [50, 57, 65], // Bar 5: Dm
-  [48, 55, 62], // Bar 6: Csus2
-  [45, 52, 60], // Bar 7: Am
-  [50, 57, 62], // Bar 8: D5
-];
-
-interface TrackProfile {
-  stepSec: number;
-  transposeSemitones: number;
-  forceZone2: number | null; // null = dynamic biome crossfade
-  leadWave: OscillatorType;
-  bassWave: OscillatorType;
-  cutoffScale: number;
-}
-
-const TRACK_PROFILES: Record<Exclude<JukeboxTrackId, 'Random'>, TrackProfile> = {
-  Base: { stepSec: 0.175, transposeSemitones: 0, forceZone2: null, leadWave: 'triangle', bassWave: 'triangle', cutoffScale: 1.0 },
-  Bits: { stepSec: 0.165, transposeSemitones: 0, forceZone2: null, leadWave: 'square', bassWave: 'square', cutoffScale: 0.82 },
-  Track1: { stepSec: 0.178, transposeSemitones: 0, forceZone2: 0.0, leadWave: 'triangle', bassWave: 'triangle', cutoffScale: 1.05 },
-  Track2: { stepSec: 0.19, transposeSemitones: -2, forceZone2: 0.15, leadWave: 'sine', bassWave: 'triangle', cutoffScale: 0.9 },
-  Track3: { stepSec: 0.182, transposeSemitones: 0, forceZone2: 1.0, leadWave: 'triangle', bassWave: 'sawtooth', cutoffScale: 0.85 },
-  Track4: { stepSec: 0.168, transposeSemitones: 2, forceZone2: 0.0, leadWave: 'triangle', bassWave: 'triangle', cutoffScale: 1.15 },
-  Track5: { stepSec: 0.155, transposeSemitones: 3, forceZone2: 0.35, leadWave: 'square', bassWave: 'triangle', cutoffScale: 1.0 },
-  Track6: { stepSec: 0.152, transposeSemitones: -1, forceZone2: 1.0, leadWave: 'sawtooth', bassWave: 'sawtooth', cutoffScale: 1.1 },
-  Remix1: { stepSec: 0.148, transposeSemitones: 2, forceZone2: 0.25, leadWave: 'square', bassWave: 'sawtooth', cutoffScale: 1.1 },
-  Remix2: { stepSec: 0.158, transposeSemitones: -3, forceZone2: 0.85, leadWave: 'square', bassWave: 'sawtooth', cutoffScale: 0.95 },
-};
-
-const RANDOM_TRACK_POOL: readonly Exclude<JukeboxTrackId, 'Random'>[] = [
-  'Base',
-  'Bits',
-  'Track1',
-  'Track2',
-  'Track3',
-  'Track4',
-  'Track5',
-  'Track6',
-  'Remix1',
-  'Remix2',
-];
-
-function midiToHz(midi: number, transpose = 0): number {
-  return 440 * Math.pow(2, (midi + transpose - 69) / 12);
+interface MusicDeck {
+  bus: GainNode;
+  trackId: PlayableTrackId;
+  stepIndex: number;
+  nextStepTime: number;
+  loopsCompleted: number;
+  customSource: AudioBufferSourceNode | null;
+  customTrackId: PlayableTrackId | null;
 }
 
 function clamp(v: number, min: number, max: number): number {
   return v < min ? min : v > max ? max : v;
 }
 
+function safeFreq(hz: number, sampleRate: number): number {
+  const maxHz = Math.max(4000, sampleRate * 0.45);
+  return clamp(hz, 24, maxHz);
+}
+
 function jitterPitch(range = PITCH_JITTER_RANGE): number {
   return 1 + (Math.random() * 2 - 1) * range;
+}
+
+function toPlayableTrackId(id: JukeboxTrackId): PlayableTrackId {
+  return id === 'Random' ? 'Track1' : id;
 }
 
 type AudioContextCtor = typeof AudioContext;
@@ -167,10 +99,15 @@ export class AudioEngine implements AudioModulePort {
   private compressor: DynamicsCompressorNode | null = null;
   private masterGain: GainNode | null = null;
   private musicGain: GainNode | null = null;
+  private musicDuckGain: GainNode | null = null;
   private sfxGain: GainNode | null = null;
-  private zone1Bus: GainNode | null = null;
-  private zone2Bus: GainNode | null = null;
   private windBed: WindBedHandle | null = null;
+  private percNoiseBuffer: AudioBuffer | null = null;
+
+  // Dual-deck A/B music architecture for seamless equal-power crossfading
+  private decks: [MusicDeck, MusicDeck] | null = null;
+  private activeDeckIndex: 0 | 1 = 0;
+  private crossfadeT = 1.0;
 
   private settings: AudioSettings = { ...DEFAULT_AUDIO_SETTINGS };
   private unlocked = false;
@@ -182,17 +119,14 @@ export class AudioEngine implements AudioModulePort {
   // Per-event micro-cooldowns (in milliseconds on monotonic clock)
   private readonly lastEventMs = new Map<string, number>();
 
-  // Music sequencer state
-  private nextStepTime = 0;
-  private stepIndex = 0;
-  private zone2Blend = 0;
-  private currentBiome: BiomeId = 'foothills';
-  private activeRandomTrack: Exclude<JukeboxTrackId, 'Random'> = 'Track1';
+  // Altitude-reactive & deterministic Random playlist tracking
+  private currentBiome: BiomeId = 'village';
+  private currentAltitude = 0;
+  private currentDarkness = 0;
+  private randomCycleIndex = 0;
 
-  // Custom audio pack buffers (optional override with procedural fallback)
-  private customUrls: Record<string, string> = {};
-  private readonly customBuffers = new Map<string, AudioBuffer | null>();
-  private readonly customLoading = new Set<string>();
+  // Lazy custom audio pack decoder & cache
+  private readonly customLoader = new CustomAudioLoader();
 
   unlock(): void {
     if (this.disposed) return;
@@ -204,6 +138,8 @@ export class AudioEngine implements AudioModulePort {
         const ctx = new Ctor();
         this.ctx = ctx;
         this.synth = new ProceduralSynth(ctx);
+        this.customLoader.attachContext(ctx);
+        this.percNoiseBuffer = this.createPercNoiseBuffer(ctx, 0.6);
 
         const compressor = ctx.createDynamicsCompressor();
         compressor.threshold.setValueAtTime(-12, ctx.currentTime);
@@ -214,15 +150,18 @@ export class AudioEngine implements AudioModulePort {
 
         const masterGain = ctx.createGain();
         const musicGain = ctx.createGain();
+        const musicDuckGain = ctx.createGain();
         const sfxGain = ctx.createGain();
-        const zone1Bus = ctx.createGain();
-        const zone2Bus = ctx.createGain();
+        const deckABus = ctx.createGain();
+        const deckBBus = ctx.createGain();
 
-        zone1Bus.gain.setValueAtTime(1, ctx.currentTime);
-        zone2Bus.gain.setValueAtTime(0, ctx.currentTime);
+        musicDuckGain.gain.setValueAtTime(1, ctx.currentTime);
+        deckABus.gain.setValueAtTime(1, ctx.currentTime);
+        deckBBus.gain.setValueAtTime(0, ctx.currentTime);
 
-        zone1Bus.connect(musicGain);
-        zone2Bus.connect(musicGain);
+        deckABus.connect(musicDuckGain);
+        deckBBus.connect(musicDuckGain);
+        musicDuckGain.connect(musicGain);
         musicGain.connect(compressor);
         sfxGain.connect(compressor);
         compressor.connect(masterGain);
@@ -231,12 +170,35 @@ export class AudioEngine implements AudioModulePort {
         this.compressor = compressor;
         this.masterGain = masterGain;
         this.musicGain = musicGain;
+        this.musicDuckGain = musicDuckGain;
         this.sfxGain = sfxGain;
-        this.zone1Bus = zone1Bus;
-        this.zone2Bus = zone2Bus;
         this.windBed = this.synth.createWindBed(sfxGain);
 
-        this.nextStepTime = ctx.currentTime + 0.06;
+        const initialTrack = this.resolveInitialTrack();
+        const startAt = ctx.currentTime + 0.06;
+        this.decks = [
+          {
+            bus: deckABus,
+            trackId: initialTrack,
+            stepIndex: 0,
+            nextStepTime: startAt,
+            loopsCompleted: 0,
+            customSource: null,
+            customTrackId: null,
+          },
+          {
+            bus: deckBBus,
+            trackId: initialTrack,
+            stepIndex: 0,
+            nextStepTime: startAt,
+            loopsCompleted: 0,
+            customSource: null,
+            customTrackId: null,
+          },
+        ];
+        this.activeDeckIndex = 0;
+        this.crossfadeT = 1.0;
+
         this.applyBusGains(true);
       }
 
@@ -266,7 +228,13 @@ export class AudioEngine implements AudioModulePort {
     };
 
     if (settings.jukeboxTrack === 'Random' && prevTrack !== 'Random') {
-      this.pickRandomTrack();
+      // Deterministic start / advance when entering Random playlist mode
+      this.randomCycleIndex = this.randomCycleIndex % RANDOM_PLAYLIST_ORDER.length;
+    }
+
+    if (this.ctx && this.decks) {
+      const target = this.resolveTargetTrackFromCachedState();
+      this.ensureTrackTarget(target, this.ctx.currentTime);
     }
 
     this.applyBusGains(false);
@@ -274,9 +242,32 @@ export class AudioEngine implements AudioModulePort {
 
   setCustomAudioPack(urls: Record<string, string>): void {
     if (this.disposed) return;
-    this.customUrls = { ...urls };
-    this.customBuffers.clear();
-    this.customLoading.clear();
+    this.stopAllCustomMusicLoops();
+    this.customLoader.setUrls(urls);
+  }
+
+  /**
+   * Optional helper to probe /.krunked-n-fred-assets/manifest.json lazily
+   * for standalone custom audio packs without throwing on 404.
+   */
+  probeCustomAudioPack(): Promise<boolean> {
+    if (this.disposed) return Promise.resolve(false);
+    return this.customLoader.probeServerPack();
+  }
+
+  getCustomAudioLoader(): CustomAudioLoader {
+    return this.customLoader;
+  }
+
+  getActiveTrackId(): PlayableTrackId {
+    if (this.decks) {
+      return this.decks[this.activeDeckIndex].trackId;
+    }
+    return this.resolveTargetTrackFromCachedState();
+  }
+
+  getCrossfadeProgress(): number {
+    return this.crossfadeT;
   }
 
   playUiSound(kind: UiSoundKind): void {
@@ -317,10 +308,15 @@ export class AudioEngine implements AudioModulePort {
   update(state: SimState, dt: number): void {
     if (this.disposed) return;
     this.currentBiome = state.currentBiome;
+    this.currentAltitude = Number.isFinite(state.altitude) ? state.altitude : 0;
+    this.currentDarkness = clamp(state.camera?.darknessAlpha ?? 0, 0, 1);
 
-    if (!this.ctx || !this.synth || !this.zone1Bus || !this.zone2Bus) return;
+    if (!this.ctx || !this.synth || !this.decks) return;
+    const now = this.ctx.currentTime;
+
     if (this.ctx.state !== 'running') {
-      this.nextStepTime = this.ctx.currentTime + 0.05;
+      this.decks[0].nextStepTime = now + 0.05;
+      this.decks[1].nextStepTime = now + 0.05;
       return;
     }
 
@@ -334,53 +330,48 @@ export class AudioEngine implements AudioModulePort {
       this.windBed.setActive(activeWind, 1.0);
     }
 
-    // 2. Subtle low-stamina grab sweat/strain micro-tick (cooldown >= 260ms)
+    // 2. Subtle low-stamina grab sweat/strain micro-tick (cooldown >= 160ms)
     if (!this.settings.muted && this.settings.sfx > 0.001) {
       this.checkGrabStrain(state.p1, state);
       this.checkGrabStrain(state.p2, state);
     }
 
-    // 3. Smooth equal-power crossfade between Zone 1 Alpine & Zone 2 Dark Mines
-    const profile = this.getActiveTrackProfile();
-    const targetBlend =
-      profile.forceZone2 !== null
-        ? profile.forceZone2
-        : this.biomeToZone2Target(state.currentBiome);
+    // 3. Resolve altitude-reactive / jukebox target track & advance equal-power crossfade
+    const targetTrack = this.resolveTargetTrack(state);
+    this.ensureTrackTarget(targetTrack, now);
 
-    const maxStep = safeDt / CROSSFADE_DURATION_SEC;
-    if (this.zone2Blend < targetBlend) {
-      this.zone2Blend = Math.min(targetBlend, this.zone2Blend + maxStep);
-    } else if (this.zone2Blend > targetBlend) {
-      this.zone2Blend = Math.max(targetBlend, this.zone2Blend - maxStep);
+    if (this.crossfadeT < 1.0) {
+      this.crossfadeT = Math.min(1.0, this.crossfadeT + safeDt / CROSSFADE_DURATION_SEC);
     }
 
-    const now = this.ctx.currentTime;
-    const z1Gain = Math.cos(this.zone2Blend * Math.PI * 0.5);
-    const z2Gain = Math.sin(this.zone2Blend * Math.PI * 0.5);
-    this.zone1Bus.gain.setTargetAtTime(z1Gain, now, 0.04);
-    this.zone2Bus.gain.setTargetAtTime(z2Gain, now, 0.04);
+    const activeDeck = this.decks[this.activeDeckIndex];
+    const outgoingDeck = this.decks[this.activeDeckIndex === 0 ? 1 : 0];
 
-    // 4. Lookahead music sequencer
+    // True equal-power crossfade curves: sin^2(x) + cos^2(x) === 1.0
+    const inGain = Math.sin(this.crossfadeT * Math.PI * 0.5);
+    const outGain = Math.cos(this.crossfadeT * Math.PI * 0.5);
+
+    activeDeck.bus.gain.setTargetAtTime(inGain, now, 0.035);
+    outgoingDeck.bus.gain.setTargetAtTime(outGain, now, 0.035);
+
+    // Stop outgoing custom BGM loop cleanly once crossfade completes
+    if (this.crossfadeT >= 1.0 && outgoingDeck.customSource) {
+      this.stopDeckCustomLoop(outgoingDeck);
+    }
+
+    // 4. Lookahead music sequencer for active (and fading-out) decks
     if (this.settings.muted || this.settings.music <= 0.001) {
-      this.nextStepTime = now + 0.05;
+      this.stopAllCustomMusicLoops();
+      activeDeck.nextStepTime = now + 0.05;
+      outgoingDeck.nextStepTime = now + 0.05;
       return;
     }
 
-    // Resync gracefully after tab-background or lag spikes (never machine-gun notes)
-    if (this.nextStepTime < now - 0.12) {
-      this.nextStepTime = now + 0.04;
-    }
+    const altitudeEnergy = this.computeAltitudeEnergy(state);
 
-    const horizon = now + LOOKAHEAD_SEC;
-    let safety = 0;
-    while (this.nextStepTime < horizon && safety < 8) {
-      this.scheduleSequencerStep(this.stepIndex, this.nextStepTime, profile, z1Gain, z2Gain);
-      this.nextStepTime += profile.stepSec;
-      this.stepIndex = (this.stepIndex + 1) % ZONE1_LEAD.length;
-      if (this.stepIndex === 0 && this.settings.jukeboxTrack === 'Random') {
-        this.pickRandomTrack();
-      }
-      safety++;
+    this.advanceMusicDeck(activeDeck, now, inGain, altitudeEnergy, true);
+    if (outGain > 0.015) {
+      this.advanceMusicDeck(outgoingDeck, now, outGain, altitudeEnergy, false);
     }
   }
 
@@ -393,8 +384,9 @@ export class AudioEngine implements AudioModulePort {
     }
     this.activeVoices = [];
     this.lastEventMs.clear();
-    this.customBuffers.clear();
-    this.customLoading.clear();
+
+    this.stopAllCustomMusicLoops();
+    this.customLoader.dispose();
 
     this.windBed?.dispose();
     this.windBed = null;
@@ -417,9 +409,10 @@ export class AudioEngine implements AudioModulePort {
     this.compressor = null;
     this.masterGain = null;
     this.musicGain = null;
+    this.musicDuckGain = null;
     this.sfxGain = null;
-    this.zone1Bus = null;
-    this.zone2Bus = null;
+    this.decks = null;
+    this.percNoiseBuffer = null;
   }
 
   /** Exposed read-only diagnostics for testing / debugging */
@@ -442,7 +435,7 @@ export class AudioEngine implements AudioModulePort {
   }
 
   // ==========================================================================
-  // Internal Mixing, Panning, Cooldowns & Polyphony Cap
+  // Internal Mixing, Panning, Ducking, Cooldowns & Polyphony Cap
   // ==========================================================================
 
   private applyBusGains(immediate: boolean): void {
@@ -460,6 +453,22 @@ export class AudioEngine implements AudioModulePort {
       this.masterGain.gain.setTargetAtTime(masterVal, now, 0.025);
       this.musicGain.gain.setTargetAtTime(musicVal, now, 0.025);
       this.sfxGain.gain.setTargetAtTime(sfxVal, now, 0.025);
+    }
+  }
+
+  private duckMusic(duckLevel: number, holdSec: number, releaseSec = 0.65): void {
+    if (!this.ctx || !this.musicDuckGain) return;
+    const now = this.ctx.currentTime;
+    const target = clamp(duckLevel, 0.15, 1.0);
+    const param = this.musicDuckGain.gain;
+    try {
+      param.cancelScheduledValues(now);
+      param.setValueAtTime(clamp(param.value, 0.1, 1.0), now);
+      param.linearRampToValueAtTime(target, now + 0.05);
+      param.setValueAtTime(target, now + 0.05 + Math.max(0.1, holdSec));
+      param.linearRampToValueAtTime(1.0, now + 0.05 + Math.max(0.1, holdSec) + Math.max(0.15, releaseSec));
+    } catch {
+      // Ignore automation errors on closing context
     }
   }
 
@@ -487,7 +496,6 @@ export class AudioEngine implements AudioModulePort {
     if (this.activeVoices.length < MAX_SFX_VOICES) {
       return true;
     }
-    // Find the oldest voice with strictly lower (or equal if high priority) priority to steal
     let victimIdx = -1;
     for (let i = 0; i < this.activeVoices.length; i++) {
       if (this.activeVoices[i].priority < priority) {
@@ -522,7 +530,6 @@ export class AudioEngine implements AudioModulePort {
   private checkGrabStrain(p: SimState['p1'], state: SimState): void {
     if (!this.synth || !this.sfxGain) return;
     if (p.action !== 'Grab' || p.grabRedTint < 0.72) return;
-    // Accelerates subtly from 320ms down to 160ms as stamina runs out (always >= 50ms)
     const intervalMs = Math.max(160, 340 - (p.grabRedTint - 0.72) * 580);
     if (!this.checkCooldown(`sweat:${p.id}`, intervalMs)) return;
     if (!this.reserveVoiceSlot(0)) return;
@@ -540,7 +547,7 @@ export class AudioEngine implements AudioModulePort {
   }
 
   // ==========================================================================
-  // Custom Audio Pack Playback (with Seamless Procedural Fallback)
+  // Custom Audio Pack Playback (via CustomAudioLoader + Procedural Fallback)
   // ==========================================================================
 
   private tryPlayCustomSample(
@@ -551,87 +558,321 @@ export class AudioEngine implements AudioModulePort {
     priority: number
   ): boolean {
     if (!this.ctx || !this.sfxGain) return false;
-    for (const key of keys) {
-      const url = this.customUrls[key];
-      if (!url) continue;
+    const cached = this.customLoader.getBufferSync(keys);
+    if (!cached) return false;
 
-      const cached = this.customBuffers.get(key);
-      if (cached) {
-        if (!this.reserveVoiceSlot(priority)) return true;
-        const now = this.ctx.currentTime;
-        const src = this.ctx.createBufferSource();
-        src.buffer = cached;
-        src.playbackRate.setValueAtTime(clamp(pitchMult, 0.5, 2.0), now);
+    if (!this.reserveVoiceSlot(priority)) return true;
+    const now = this.ctx.currentTime;
+    const src = this.ctx.createBufferSource();
+    src.buffer = cached;
+    const rate = clamp(pitchMult, 0.5, 2.0);
+    src.playbackRate.setValueAtTime(rate, now);
 
-        const gain = this.ctx.createGain();
-        gain.gain.setValueAtTime(clamp(volume, 0, 1.5), now);
+    const gain = this.ctx.createGain();
+    gain.gain.setValueAtTime(clamp(volume, 0, 1.5), now);
 
-        let panNode: StereoPannerNode | null = null;
-        if (typeof this.ctx.createStereoPanner === 'function') {
-          panNode = this.ctx.createStereoPanner();
-          panNode.pan.setValueAtTime(clamp(pan, -0.85, 0.85), now);
-          src.connect(gain);
-          gain.connect(panNode);
-          panNode.connect(this.sfxGain);
-        } else {
-          src.connect(gain);
-          gain.connect(this.sfxGain);
-        }
-
-        let ended = false;
-        const rate = clamp(pitchMult, 0.5, 2.0);
-        const handle: VoiceHandle = {
-          priority,
-          endTime: now + cached.duration / rate + 0.02,
-          stop: (fadeSec = 0.015): void => {
-            if (ended || !this.ctx) return;
-            ended = true;
-            const t = this.ctx.currentTime;
-            try {
-              gain.gain.linearRampToValueAtTime(0, t + Math.max(0.005, fadeSec));
-              src.stop(t + Math.max(0.006, fadeSec) + 0.004);
-            } catch {
-              // Ignore
-            }
-            this.releaseVoice(handle);
-          },
-        };
-        src.onended = () => {
-          if (ended) return;
-          ended = true;
-          try {
-            src.disconnect();
-            gain.disconnect();
-            panNode?.disconnect();
-          } catch {
-            // Ignore
-          }
-          this.releaseVoice(handle);
-        };
-        this.trackVoice(handle);
-        src.start(now);
-        return true;
-      }
-
-      // Kick off lazy background decode for next play; fall back to synth right now
-      if (cached === undefined && !this.customLoading.has(key) && typeof fetch === 'function') {
-        this.customLoading.add(key);
-        const ctxRef = this.ctx;
-        fetch(url)
-          .then((res) => (res.ok ? res.arrayBuffer() : Promise.reject(new Error('HTTP error'))))
-          .then((arr) => ctxRef.decodeAudioData(arr))
-          .then((decoded) => {
-            if (!this.disposed) this.customBuffers.set(key, decoded);
-          })
-          .catch(() => {
-            if (!this.disposed) this.customBuffers.set(key, null);
-          })
-          .finally(() => {
-            this.customLoading.delete(key);
-          });
-      }
+    let panNode: StereoPannerNode | null = null;
+    if (typeof this.ctx.createStereoPanner === 'function') {
+      panNode = this.ctx.createStereoPanner();
+      panNode.pan.setValueAtTime(clamp(pan, -0.85, 0.85), now);
+      src.connect(gain);
+      gain.connect(panNode);
+      panNode.connect(this.sfxGain);
+    } else {
+      src.connect(gain);
+      gain.connect(this.sfxGain);
     }
-    return false;
+
+    let ended = false;
+    const handle: VoiceHandle = {
+      priority,
+      endTime: now + cached.duration / rate + 0.02,
+      stop: (fadeSec = 0.015): void => {
+        if (ended || !this.ctx) return;
+        ended = true;
+        const t = this.ctx.currentTime;
+        try {
+          gain.gain.linearRampToValueAtTime(0, t + Math.max(0.005, fadeSec));
+          src.stop(t + Math.max(0.006, fadeSec) + 0.004);
+        } catch {
+          // Ignore stop errors
+        }
+        this.releaseVoice(handle);
+      },
+    };
+    src.onended = () => {
+      if (ended) return;
+      ended = true;
+      try {
+        src.disconnect();
+        gain.disconnect();
+        panNode?.disconnect();
+      } catch {
+        // Ignore cleanup errors
+      }
+      this.releaseVoice(handle);
+    };
+    this.trackVoice(handle);
+    src.start(now);
+    return true;
+  }
+
+  // ==========================================================================
+  // Crisp Celebratory Stinger Shimmer Accent Helper
+  // Layers harmonic bells/sparkles cleanly inside a single VoiceHandle.
+  // ==========================================================================
+
+  private createCompositeStinger(
+    baseVoice: VoiceHandle,
+    shimmerNotes: readonly { offset: number; freq: number; dur: number; wave: OscillatorType; gain: number }[],
+    priority: number,
+    onAccentEnd: () => void
+  ): VoiceHandle {
+    if (!this.ctx || !this.sfxGain || shimmerNotes.length === 0) {
+      onAccentEnd();
+      return baseVoice;
+    }
+
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate || 44100;
+    const tBase = ctx.currentTime;
+    const out = ctx.createGain();
+    out.gain.setValueAtTime(1, tBase);
+    out.connect(this.sfxGain);
+
+    const oscs: OscillatorNode[] = [];
+    let maxEnd = baseVoice.endTime;
+
+    for (const note of shimmerNotes) {
+      const t0 = tBase + Math.max(0, note.offset);
+      const dur = Math.max(0.03, note.dur);
+      const t1 = t0 + dur;
+      const osc = ctx.createOscillator();
+      const env = ctx.createGain();
+      osc.type = note.wave;
+      osc.frequency.setValueAtTime(safeFreq(note.freq, sr), t0);
+
+      const peak = Math.max(0.0002, note.gain);
+      env.gain.setValueAtTime(0.0001, t0);
+      env.gain.linearRampToValueAtTime(peak, t0 + Math.min(0.008, dur * 0.25));
+      env.gain.exponentialRampToValueAtTime(0.0001, Math.max(t0 + 0.014, t1 - 0.006));
+      env.gain.linearRampToValueAtTime(0, t1);
+
+      osc.connect(env);
+      env.connect(out);
+      osc.start(t0);
+      osc.stop(t1 + 0.01);
+      oscs.push(osc);
+      if (t1 + 0.01 > maxEnd) maxEnd = t1 + 0.01;
+    }
+
+    let cleaned = false;
+    const cleanupAccent = (): void => {
+      if (cleaned) return;
+      cleaned = true;
+      try {
+        out.disconnect();
+      } catch {
+        // Ignore
+      }
+      onAccentEnd();
+    };
+
+    const lastOsc = oscs[oscs.length - 1];
+    if (lastOsc) {
+      lastOsc.onended = cleanupAccent;
+    }
+
+    return {
+      priority,
+      endTime: maxEnd,
+      stop: (fadeSec = 0.015): void => {
+        baseVoice.stop(fadeSec);
+        if (cleaned) return;
+        const t = ctx.currentTime;
+        try {
+          out.gain.cancelScheduledValues(t);
+          out.gain.setValueAtTime(Math.max(0.0001, out.gain.value), t);
+          out.gain.linearRampToValueAtTime(0, t + Math.max(0.005, fadeSec));
+        } catch {
+          // Ignore
+        }
+        const stopAt = t + Math.max(0.006, fadeSec) + 0.004;
+        for (const osc of oscs) {
+          try {
+            osc.stop(stopAt);
+          } catch {
+            // Already stopped
+          }
+        }
+        cleanupAccent();
+      },
+    };
+  }
+
+  private playCelebratoryBossDefeated(onVoiceEnd: () => void): VoiceHandle | null {
+    if (!this.synth || !this.sfxGain) return null;
+    this.duckMusic(0.32, 1.35, 0.75);
+    let baseDone = false;
+    let accentDone = false;
+    const tryFinish = (): void => {
+      if (baseDone && accentDone) onVoiceEnd();
+    };
+    const base = this.synth.playBossDefeated(this.sfxGain, {
+      pan: 0,
+      onVoiceEnd: () => {
+        baseDone = true;
+        tryFinish();
+      },
+    });
+    return this.createCompositeStinger(
+      base,
+      [
+        { offset: 0.14, freq: 1046.5, dur: 0.14, wave: 'sine', gain: 0.14 },
+        { offset: 0.38, freq: 1567.98, dur: 0.18, wave: 'sine', gain: 0.16 },
+        { offset: 0.50, freq: 2093.0, dur: 0.24, wave: 'sine', gain: 0.15 },
+        { offset: 0.84, freq: 2093.0, dur: 0.62, wave: 'sine', gain: 0.18 },
+        { offset: 0.96, freq: 2637.02, dur: 0.52, wave: 'sine', gain: 0.14 },
+      ],
+      4,
+      () => {
+        accentDone = true;
+        tryFinish();
+      }
+    );
+  }
+
+  private playCelebratorySummitReached(noAssist: boolean, onVoiceEnd: () => void): VoiceHandle | null {
+    if (!this.synth || !this.sfxGain) return null;
+    this.duckMusic(0.35, 1.45, 0.8);
+    let baseDone = false;
+    let accentDone = false;
+    const tryFinish = (): void => {
+      if (baseDone && accentDone) onVoiceEnd();
+    };
+    const base = this.synth.playSummitReached(this.sfxGain, noAssist, {
+      pan: 0,
+      onVoiceEnd: () => {
+        baseDone = true;
+        tryFinish();
+      },
+    });
+    const shimmer = [
+      { offset: 0.38, freq: 2093.0, dur: 0.28, wave: 'sine' as OscillatorType, gain: 0.12 },
+      { offset: 0.86, freq: 1567.98, dur: 0.68, wave: 'triangle' as OscillatorType, gain: 0.14 },
+      { offset: 0.88, freq: 2093.0, dur: 0.68, wave: 'sine' as OscillatorType, gain: 0.16 },
+      ...(noAssist
+        ? [
+            { offset: 1.04, freq: 2637.02, dur: 0.55, wave: 'sine' as OscillatorType, gain: 0.15 },
+            { offset: 1.18, freq: 3135.96, dur: 0.58, wave: 'sine' as OscillatorType, gain: 0.14 },
+          ]
+        : []),
+    ];
+    return this.createCompositeStinger(base, shimmer, 4, () => {
+      accentDone = true;
+      tryFinish();
+    });
+  }
+
+  private playCelebratoryTimeTrialFinish(medal: MedalTier, onVoiceEnd: () => void): VoiceHandle | null {
+    if (!this.synth || !this.sfxGain) return null;
+    this.duckMusic(0.42, 0.9, 0.55);
+    let baseDone = false;
+    let accentDone = false;
+    const tryFinish = (): void => {
+      if (baseDone && accentDone) onVoiceEnd();
+    };
+    const base = this.synth.playTimeTrialFinish(this.sfxGain, medal, {
+      pan: 0,
+      onVoiceEnd: () => {
+        baseDone = true;
+        tryFinish();
+      },
+    });
+    const shimmer =
+      medal === 'platinum'
+        ? [
+            { offset: 0.06, freq: 1567.98, dur: 0.16, wave: 'sine' as OscillatorType, gain: 0.14 },
+            { offset: 0.16, freq: 2093.0, dur: 0.2, wave: 'sine' as OscillatorType, gain: 0.15 },
+            { offset: 0.28, freq: 2637.02, dur: 0.28, wave: 'sine' as OscillatorType, gain: 0.16 },
+            { offset: 0.36, freq: 3135.96, dur: 0.48, wave: 'sine' as OscillatorType, gain: 0.17 },
+          ]
+        : medal === 'gold'
+          ? [
+              { offset: 0.14, freq: 1567.98, dur: 0.2, wave: 'sine' as OscillatorType, gain: 0.13 },
+              { offset: 0.28, freq: 2349.32, dur: 0.42, wave: 'sine' as OscillatorType, gain: 0.15 },
+            ]
+          : [
+              { offset: 0.22, freq: 1760.0, dur: 0.34, wave: 'sine' as OscillatorType, gain: 0.11 },
+            ];
+    return this.createCompositeStinger(base, shimmer, 4, () => {
+      accentDone = true;
+      tryFinish();
+    });
+  }
+
+  private playCelebratoryRpsResult(winner: 'p1' | 'p2' | 'draw', onVoiceEnd: () => void): VoiceHandle | null {
+    if (!this.synth || !this.sfxGain) return null;
+    let baseDone = false;
+    let accentDone = false;
+    const tryFinish = (): void => {
+      if (baseDone && accentDone) onVoiceEnd();
+    };
+    const base = this.synth.playRpsResult(this.sfxGain, winner, {
+      pan: 0,
+      onVoiceEnd: () => {
+        baseDone = true;
+        tryFinish();
+      },
+    });
+    const shimmer =
+      winner === 'draw'
+        ? [
+            { offset: 0.02, freq: 523.25, dur: 0.08, wave: 'sine' as OscillatorType, gain: 0.1 },
+            { offset: 0.12, freq: 466.16, dur: 0.12, wave: 'sine' as OscillatorType, gain: 0.1 },
+          ]
+        : winner === 'p1'
+          ? [
+              { offset: 0.08, freq: 1174.66, dur: 0.16, wave: 'triangle' as OscillatorType, gain: 0.13 },
+              { offset: 0.16, freq: 1479.98, dur: 0.26, wave: 'sine' as OscillatorType, gain: 0.15 },
+            ]
+          : [
+              { offset: 0.08, freq: 1318.51, dur: 0.16, wave: 'triangle' as OscillatorType, gain: 0.13 },
+              { offset: 0.16, freq: 1661.22, dur: 0.26, wave: 'sine' as OscillatorType, gain: 0.15 },
+            ];
+    return this.createCompositeStinger(base, shimmer, 2, () => {
+      accentDone = true;
+      tryFinish();
+    });
+  }
+
+  private playCelebratoryAchievementUnlock(onVoiceEnd: () => void): VoiceHandle | null {
+    if (!this.synth || !this.sfxGain) return null;
+    this.duckMusic(0.55, 0.65, 0.45);
+    let baseDone = false;
+    let accentDone = false;
+    const tryFinish = (): void => {
+      if (baseDone && accentDone) onVoiceEnd();
+    };
+    const base = this.synth.playAchievementUnlock(this.sfxGain, {
+      pan: 0,
+      onVoiceEnd: () => {
+        baseDone = true;
+        tryFinish();
+      },
+    });
+    return this.createCompositeStinger(
+      base,
+      [
+        { offset: 0.14, freq: 1975.53, dur: 0.2, wave: 'sine', gain: 0.11 },
+        { offset: 0.21, freq: 2637.02, dur: 0.44, wave: 'sine', gain: 0.14 },
+      ],
+      3,
+      () => {
+        accentDone = true;
+        tryFinish();
+      }
+    );
   }
 
   // ==========================================================================
@@ -877,20 +1118,29 @@ export class AudioEngine implements AudioModulePort {
       }
 
       case 'boss_defeated': {
-        if (this.tryPlayCustomSample(['boss_defeated'], 0, 0.85, 1.0, 4)) return;
-        spawn(4, (onVoiceEnd) => synth.playBossDefeated(sfx, { pan: 0, onVoiceEnd }));
+        if (this.tryPlayCustomSample(['boss_defeated'], 0, 0.85, 1.0, 4)) {
+          this.duckMusic(0.35, 1.3, 0.7);
+          return;
+        }
+        spawn(4, (onVoiceEnd) => this.playCelebratoryBossDefeated(onVoiceEnd));
         return;
       }
 
       case 'summit_reached': {
-        if (this.tryPlayCustomSample(['summit_reached'], 0, 0.85, 1.0, 4)) return;
-        spawn(4, (onVoiceEnd) => synth.playSummitReached(sfx, event.noAssist, { pan: 0, onVoiceEnd }));
+        if (this.tryPlayCustomSample(['summit_reached'], 0, 0.85, 1.0, 4)) {
+          this.duckMusic(0.38, 1.4, 0.75);
+          return;
+        }
+        spawn(4, (onVoiceEnd) => this.playCelebratorySummitReached(event.noAssist, onVoiceEnd));
         return;
       }
 
       case 'time_trial_finish': {
-        if (this.tryPlayCustomSample(['time_trial_finish'], 0, 0.78, 1.0, 4)) return;
-        spawn(4, (onVoiceEnd) => synth.playTimeTrialFinish(sfx, event.medal, { pan: 0, onVoiceEnd }));
+        if (this.tryPlayCustomSample([`time_trial_finish_${event.medal}`, 'time_trial_finish'], 0, 0.78, 1.0, 4)) {
+          this.duckMusic(0.45, 0.9, 0.55);
+          return;
+        }
+        spawn(4, (onVoiceEnd) => this.playCelebratoryTimeTrialFinish(event.medal, onVoiceEnd));
         return;
       }
 
@@ -904,13 +1154,26 @@ export class AudioEngine implements AudioModulePort {
       }
 
       case 'rps_result': {
-        spawn(2, (onVoiceEnd) => synth.playRpsResult(sfx, event.winner, { pan: 0, onVoiceEnd }));
+        if (this.tryPlayCustomSample([`rps_result_${event.winner}`, 'rps_result'], 0, 0.65, 1.0, 2)) return;
+        spawn(2, (onVoiceEnd) => this.playCelebratoryRpsResult(event.winner, onVoiceEnd));
         return;
       }
 
       case 'achievement_unlock': {
         if (!this.checkCooldown(`achievement:${event.id}`, 200)) return;
-        spawn(3, (onVoiceEnd) => synth.playAchievementUnlock(sfx, { pan: 0, onVoiceEnd }));
+        if (
+          this.tryPlayCustomSample(
+            [`achievement_unlock_${event.id.toLowerCase()}`, 'achievement_unlock'],
+            0,
+            0.7,
+            1.0,
+            3
+          )
+        ) {
+          this.duckMusic(0.55, 0.65, 0.45);
+          return;
+        }
+        spawn(3, (onVoiceEnd) => this.playCelebratoryAchievementUnlock(onVoiceEnd));
         return;
       }
 
@@ -920,176 +1183,564 @@ export class AudioEngine implements AudioModulePort {
   }
 
   // ==========================================================================
-  // Dynamic Alpine <-> Subterranean Music Sequencer
+  // Dual-Deck Altitude-Reactive & Jukebox Music Engine
   // ==========================================================================
 
-  private biomeToZone2Target(biome: BiomeId): number {
-    switch (biome) {
-      case 'mines':
-      case 'lab':
-      case 'boss':
-        return 1.0;
-      case 'crags':
-        return 0.18; // Subtle atmospheric undertone in windy crags while keeping alpine bounce
-      case 'village':
-      case 'foothills':
-      case 'summit':
-      default:
-        return 0.0;
+  private resolveInitialTrack(): PlayableTrackId {
+    return this.resolveTargetTrackFromCachedState();
+  }
+
+  private resolveTargetTrackFromCachedState(): PlayableTrackId {
+    if (this.settings.jukeboxTrack === 'Random') {
+      return getDeterministicRandomTrack(this.randomCycleIndex);
+    }
+    if (this.settings.jukeboxTrack === 'Base') {
+      return toPlayableTrackId(getBiomeDefaultTrack(this.currentBiome));
+    }
+    return this.settings.jukeboxTrack;
+  }
+
+  private resolveTargetTrack(state: SimState): PlayableTrackId {
+    if (this.settings.jukeboxTrack === 'Random') {
+      return getDeterministicRandomTrack(this.randomCycleIndex);
+    }
+    if (this.settings.jukeboxTrack === 'Base') {
+      const effectiveBiome: BiomeId =
+        state.boss.active && !state.boss.defeated ? 'boss' : state.currentBiome;
+      return toPlayableTrackId(getBiomeDefaultTrack(effectiveBiome));
+    }
+    // Manual Jukebox track lock
+    return this.settings.jukeboxTrack;
+  }
+
+  private computeAltitudeEnergy(state: SimState): number {
+    const summitRef =
+      state.mode === 'lab_dlc'
+        ? WORLD.LAB_SUMMIT_Y
+        : state.mode === 'solo_jeff'
+          ? WORLD.SOLO_SUMMIT_Y
+          : WORLD.COOP_SUMMIT_Y;
+    const normAlt = clamp(this.currentAltitude / Math.max(1, summitRef), 0, 1);
+    const windBoost = state.windActive && state.windPhase === 'active' ? 0.1 : 0;
+    const bossBoost = state.boss.active && !state.boss.defeated ? 0.14 : 0;
+    return clamp(normAlt + windBoost + bossBoost, 0, 1.2);
+  }
+
+  private ensureTrackTarget(targetTrack: PlayableTrackId, now: number): void {
+    if (!this.decks) return;
+    const activeDeck = this.decks[this.activeDeckIndex];
+    const outgoingIndex: 0 | 1 = this.activeDeckIndex === 0 ? 1 : 0;
+    const outgoingDeck = this.decks[outgoingIndex];
+
+    if (activeDeck.trackId === targetTrack) {
+      return;
+    }
+
+    // If reversing mid-crossfade back to the outgoing deck's track, invert crossfade seamlessly!
+    if (this.crossfadeT < 1.0 && outgoingDeck.trackId === targetTrack) {
+      this.activeDeckIndex = outgoingIndex;
+      this.crossfadeT = clamp(1.0 - this.crossfadeT, 0, 1);
+      return;
+    }
+
+    // If crossfade is less than halfway, keep louder outgoing deck fading out and replace active deck
+    if (this.crossfadeT < 0.5) {
+      this.resetDeckForTrack(activeDeck, targetTrack, now);
+      this.crossfadeT = 0;
+      activeDeck.bus.gain.setTargetAtTime(0, now, 0.025);
+      return;
+    }
+
+    // Otherwise promote current active deck to outgoing and start new track on the standby deck
+    this.activeDeckIndex = outgoingIndex;
+    const nextActive = this.decks[this.activeDeckIndex];
+    this.resetDeckForTrack(nextActive, targetTrack, now);
+    this.crossfadeT = 0;
+  }
+
+  private resetDeckForTrack(deck: MusicDeck, trackId: PlayableTrackId, now: number): void {
+    this.stopDeckCustomLoop(deck);
+    deck.trackId = trackId;
+    deck.stepIndex = 0;
+    deck.loopsCompleted = 0;
+    deck.nextStepTime = now + 0.04;
+  }
+
+  private stopDeckCustomLoop(deck: MusicDeck): void {
+    if (deck.customSource) {
+      try {
+        deck.customSource.stop();
+        deck.customSource.disconnect();
+      } catch {
+        // Ignore already-stopped source
+      }
+      deck.customSource = null;
+      deck.customTrackId = null;
     }
   }
 
-  private pickRandomTrack(): void {
-    const idx = Math.floor(Math.random() * RANDOM_TRACK_POOL.length);
-    this.activeRandomTrack = RANDOM_TRACK_POOL[idx] ?? 'Base';
+  private stopAllCustomMusicLoops(): void {
+    if (!this.decks) return;
+    this.stopDeckCustomLoop(this.decks[0]);
+    this.stopDeckCustomLoop(this.decks[1]);
   }
 
-  private getActiveTrackProfile(): TrackProfile {
-    const key =
-      this.settings.jukeboxTrack === 'Random'
-        ? this.activeRandomTrack
-        : this.settings.jukeboxTrack;
-    return TRACK_PROFILES[key] ?? TRACK_PROFILES.Base;
+  private tryAttachCustomMusicLoop(deck: MusicDeck, now: number): boolean {
+    if (!this.ctx) return false;
+    const idLower = deck.trackId.toLowerCase();
+    const customBuf = this.customLoader.getBufferSync([
+      `music_${idLower}`,
+      `bgm_${idLower}`,
+      `jukebox_${idLower}`,
+      idLower,
+    ]);
+    if (!customBuf) {
+      if (deck.customSource) this.stopDeckCustomLoop(deck);
+      return false;
+    }
+
+    if (deck.customSource && deck.customTrackId === deck.trackId) {
+      return true;
+    }
+
+    this.stopDeckCustomLoop(deck);
+    const src = this.ctx.createBufferSource();
+    src.buffer = customBuf;
+    src.loop = true;
+    src.connect(deck.bus);
+    src.start(now);
+    deck.customSource = src;
+    deck.customTrackId = deck.trackId;
+    return true;
   }
 
-  private scheduleSequencerStep(
+  private advanceMusicDeck(
+    deck: MusicDeck,
+    now: number,
+    deckGain: number,
+    altitudeEnergy: number,
+    isPrimaryActive: boolean
+  ): void {
+    if (deckGain <= 0.01) return;
+
+    // Prefer custom pack BGM AudioBuffer if decoded; otherwise run procedural sequencer
+    if (this.tryAttachCustomMusicLoop(deck, now)) {
+      deck.nextStepTime = now + 0.05;
+      return;
+    }
+
+    const track = JUKEBOX_TRACK_DATA[deck.trackId];
+    if (!track || track.length <= 0) return;
+
+    // Resync gracefully after tab-background or lag spikes (never machine-gun notes)
+    if (deck.nextStepTime < now - 0.14) {
+      deck.nextStepTime = now + 0.04;
+    }
+
+    const horizon = now + LOOKAHEAD_SEC;
+    let safety = 0;
+    while (deck.nextStepTime < horizon && safety < 8) {
+      this.scheduleTrackStep(deck.bus, track, deck.stepIndex, deck.nextStepTime, altitudeEnergy);
+      deck.nextStepTime += track.stepSec;
+      deck.stepIndex = (deck.stepIndex + 1) % track.length;
+
+      if (deck.stepIndex === 0) {
+        deck.loopsCompleted++;
+        if (
+          isPrimaryActive &&
+          this.settings.jukeboxTrack === 'Random' &&
+          deck.loopsCompleted >= RANDOM_LOOPS_PER_TRACK
+        ) {
+          this.randomCycleIndex++;
+          const nextRandom = getDeterministicRandomTrack(this.randomCycleIndex);
+          this.ensureTrackTarget(nextRandom, deck.nextStepTime);
+          break;
+        }
+      }
+      safety++;
+    }
+  }
+
+  private scheduleTrackStep(
+    dest: AudioNode,
+    track: JukeboxTrackData,
     step: number,
     time: number,
-    profile: TrackProfile,
-    z1Gain: number,
-    z2Gain: number
+    altitudeEnergy: number
   ): void {
-    if (!this.synth || !this.zone1Bus || !this.zone2Bus) return;
-    const stepDur = profile.stepSec;
-    const transpose = profile.transposeSemitones;
-    const barIndex = Math.floor(step / 6);
-    const beatInBar = step % 6;
+    if (!this.synth) return;
+
+    const stepDur = track.stepSec;
+    const barStep = step % track.stepsPerBar;
+    const barIndex = Math.floor(step / track.stepsPerBar);
+
+    // Subtle altitude & cave darkness timbre responsiveness
+    const brightnessScale =
+      (0.95 + altitudeEnergy * 0.16) * (this.currentDarkness > 0.35 ? 0.88 : 1.0);
 
     // ------------------------------------------------------------------------
-    // Zone 1: Cozy Snowy Foothills Alpine Waltz
+    // 1. Lead Melody Voice
     // ------------------------------------------------------------------------
-    if (z1Gain > 0.015) {
-      const leadMidi = ZONE1_LEAD[step];
-      if (leadMidi > 0) {
-        const hz = midiToHz(leadMidi, transpose);
-        const dur = stepDur * (beatInBar === 0 || beatInBar === 3 ? 1.55 : 0.92);
-        const leadGain = profile.leadWave === 'square' ? 0.075 : 0.145;
-        this.synth.scheduleMusicNote(
-          this.zone1Bus,
-          time,
-          hz,
-          dur,
-          profile.leadWave,
-          leadGain,
-          3400 * profile.cutoffScale,
-          0.008
-        );
-      }
+    const leadMidi = track.lead[step] ?? 0;
+    if (leadMidi > 0) {
+      const hz = midiToHz(leadMidi);
+      const isDownbeat = barStep === 0 || barStep === Math.floor(track.stepsPerBar / 2);
+      const nextLead = track.lead[(step + 1) % track.length] ?? 0;
+      const sustainMult = nextLead === 0 ? (isDownbeat ? 1.7 : 1.35) : 0.9;
+      const dur = stepDur * sustainMult;
+      const cutoff = track.leadCutoffHz * brightnessScale;
 
-      const sparkleMidi = ZONE1_SPARKLE[step];
-      if (sparkleMidi > 0) {
-        const hz = midiToHz(sparkleMidi, transpose);
-        const sparkleBoost = this.currentBiome === 'summit' ? 1.35 : 1.0;
-        this.synth.scheduleMusicNote(
-          this.zone1Bus,
-          time,
-          hz,
-          stepDur * 1.4,
-          'sine',
-          0.048 * sparkleBoost,
-          5200 * profile.cutoffScale,
-          0.004
-        );
-      }
+      switch (track.articulation) {
+        case 'celesta':
+          this.synth.scheduleMusicNote(dest, time, hz, dur * 1.15, 'sine', track.leadGain, cutoff, 0.004);
+          this.synth.scheduleMusicNote(dest, time, hz * 2, dur * 0.65, 'sine', track.leadGain * 0.28, cutoff * 1.3, 0.003);
+          break;
 
-      const bassMidi = ZONE1_BASS[step];
-      if (bassMidi > 0) {
-        const hz = midiToHz(bassMidi, transpose);
-        const accent = beatInBar === 0 ? 1.15 : 0.85;
-        this.synth.scheduleMusicBass(
-          this.zone1Bus,
-          time,
-          hz,
-          stepDur * (beatInBar === 0 ? 1.65 : 0.9),
-          0.145 * accent,
-          profile.bassWave,
-          640 * profile.cutoffScale
-        );
-      }
+        case 'chiptune':
+          this.synth.scheduleMusicNote(dest, time, hz, stepDur * 0.88, 'square', track.leadGain, cutoff, 0.002);
+          break;
 
-      // Soft brushed alpine percussion (OOM-tick-tick)
-      if (beatInBar === 0) {
-        this.synth.scheduleMusicKick(this.zone1Bus, time, 0.13);
-      } else if (beatInBar === 2 || beatInBar === 4) {
-        this.synth.scheduleMusicHat(this.zone1Bus, time, 0.036, true);
-      }
-    }
+        case 'alpine':
+          this.synth.scheduleMusicNote(dest, time, hz, dur, 'triangle', track.leadGain, cutoff, 0.006);
+          if (isDownbeat) {
+            this.synth.scheduleMusicNote(dest, time, hz * 2, dur * 0.6, 'sine', track.leadGain * 0.22, cutoff * 1.25, 0.004);
+          }
+          break;
 
-    // ------------------------------------------------------------------------
-    // Zone 2: Atmospheric Subterranean Dark Mines / Lab Pulse
-    // ------------------------------------------------------------------------
-    if (z2Gain > 0.015) {
-      const isElectronic = this.currentBiome === 'lab' || this.currentBiome === 'boss';
-      const pulseMidi = ZONE2_PULSE_BASS[step];
-      if (pulseMidi > 0) {
-        const hz = midiToHz(pulseMidi, transpose);
-        const bassWave: OscillatorType = isElectronic ? 'sawtooth' : profile.bassWave === 'square' ? 'square' : 'sawtooth';
-        const cutoff = (isElectronic ? 880 : 480) * profile.cutoffScale;
-        this.synth.scheduleMusicBass(
-          this.zone2Bus,
-          time,
-          hz,
-          stepDur * 1.15,
-          isElectronic ? 0.135 : 0.155,
-          bassWave,
-          cutoff
-        );
-      }
+        case 'marimba':
+          this.synth.scheduleCavernPing(dest, time, hz, track.leadGain * 0.88);
+          this.synth.scheduleMusicNote(dest, time, hz * 0.5, stepDur * 0.9, 'triangle', track.leadGain * 0.32, 950, 0.003);
+          break;
 
-      // Subterranean crystal / water-drop echoing arpeggio
-      const arpMidi = ZONE2_CAVERN_ARP[step];
-      if (arpMidi > 0) {
-        const hz = midiToHz(arpMidi, transpose);
-        if (isElectronic) {
+        case 'arp':
+          this.synth.scheduleMusicNote(dest, time, hz, dur, 'triangle', track.leadGain, cutoff, 0.005);
+          break;
+
+        case 'icy_bell': {
+          const summitSparkle = this.currentAltitude >= WORLD.ZONE4_START_Y ? 1.2 : 1.0;
+          this.synth.scheduleMusicNote(dest, time, hz, dur * 1.25, 'sine', track.leadGain * summitSparkle, cutoff, 0.003);
           this.synth.scheduleMusicNote(
-            this.zone2Bus,
+            dest,
             time,
-            hz,
-            stepDur * 0.9,
-            'square',
-            0.068,
-            2400 * profile.cutoffScale,
-            0.005
+            hz * 2,
+            dur * 0.85,
+            'sine',
+            track.leadGain * 0.34 * summitSparkle,
+            cutoff * 1.3,
+            0.002
           );
+          break;
+        }
+
+        case 'electric_funk':
+          this.synth.scheduleMusicNote(dest, time, hz, stepDur * (nextLead === 0 ? 1.15 : 0.78), 'sawtooth', track.leadGain, cutoff, 0.004);
+          break;
+
+        case 'boss_lead':
+          // Twin slightly detuned sawtooth oscillators for fierce boss presence
+          this.synth.scheduleMusicNote(dest, time, hz, dur * 0.92, 'sawtooth', track.leadGain * 0.72, cutoff, 0.003);
+          this.synth.scheduleMusicNote(dest, time, hz * 1.0045, dur * 0.92, 'sawtooth', track.leadGain * 0.52, cutoff * 1.1, 0.003);
+          break;
+
+        case 'retro_16bit':
+          this.synth.scheduleMusicNote(dest, time, hz, stepDur * 0.9, 'square', track.leadGain, cutoff, 0.003);
+          this.synth.scheduleMusicNote(dest, time, hz * 2, stepDur * 0.55, 'triangle', track.leadGain * 0.35, cutoff * 1.2, 0.002);
+          break;
+
+        case 'synthwave':
+          // Warm detuned analog twin-saw lead
+          this.synth.scheduleMusicNote(dest, time, hz * 0.997, dur * 1.2, 'sawtooth', track.leadGain * 0.65, cutoff, 0.014);
+          this.synth.scheduleMusicNote(dest, time, hz * 1.003, dur * 1.2, 'sawtooth', track.leadGain * 0.6, cutoff * 1.08, 0.014);
+          break;
+      }
+
+      // Optional atmospheric delay echo (Dark Mines marimba, Village celesta, Summit bells, Synthwave)
+      if (track.echoSteps && track.echoGain && track.echoGain > 0.01) {
+        const echoTime = time + stepDur * track.echoSteps;
+        if (track.articulation === 'marimba') {
+          this.synth.scheduleCavernPing(dest, echoTime, hz, track.leadGain * track.echoGain);
         } else {
-          this.synth.scheduleCavernPing(this.zone2Bus, time, hz, 0.095);
-          // Subtle ghostly cave echo 2 steps later
-          this.synth.scheduleCavernPing(this.zone2Bus, time + stepDur * 2, hz, 0.036);
-        }
-      }
-
-      // Slow subterranean pad chord on the start of every 6-step bar
-      if (beatInBar === 0) {
-        const chord = ZONE2_PADS[barIndex];
-        if (chord) {
-          const freqs = chord.map((m) => midiToHz(m, transpose));
-          this.synth.schedulePadChord(
-            this.zone2Bus,
-            time,
-            freqs,
-            stepDur * 5.8,
-            isElectronic ? 0.08 : 0.11,
-            (isElectronic ? 1050 : 660) * profile.cutoffScale
+          this.synth.scheduleMusicNote(
+            dest,
+            echoTime,
+            hz,
+            dur * 0.85,
+            track.articulation === 'synthwave' ? 'triangle' : 'sine',
+            track.leadGain * track.echoGain,
+            cutoff * 0.75,
+            0.008
           );
         }
-      }
-
-      // Deep subterranean heartbeat pulse
-      if (beatInBar === 0 || (isElectronic && beatInBar === 3)) {
-        this.synth.scheduleMusicKick(this.zone2Bus, time, isElectronic ? 0.16 : 0.12);
-      } else if (beatInBar === 3) {
-        this.synth.scheduleMusicHat(this.zone2Bus, time, 0.028, false);
       }
     }
+
+    // ------------------------------------------------------------------------
+    // 2. Counter-Harmony / Arpeggio Voice
+    // ------------------------------------------------------------------------
+    const harmonyMidi = track.harmony[step] ?? 0;
+    if (harmonyMidi > 0 && track.harmonyGain > 0.001) {
+      const hz = midiToHz(harmonyMidi);
+      const arpFast =
+        track.articulation === 'chiptune' ||
+        track.articulation === 'arp' ||
+        track.articulation === 'retro_16bit' ||
+        track.articulation === 'synthwave';
+      const dur = stepDur * (arpFast ? 0.82 : 1.25);
+      this.synth.scheduleMusicNote(
+        dest,
+        time,
+        hz,
+        dur,
+        track.harmonyWave,
+        track.harmonyGain,
+        track.harmonyCutoffHz * brightnessScale,
+        arpFast ? 0.003 : 0.008
+      );
+    }
+
+    // ------------------------------------------------------------------------
+    // 3. Bassline Voice (with funky slap-pop accent for Laboratory DLC!)
+    // ------------------------------------------------------------------------
+    const bassMidi = track.bass[step] ?? 0;
+    if (bassMidi > 0 && track.bassGain > 0.001) {
+      const hz = midiToHz(bassMidi);
+      const isAccent = barStep === 0 || (track.articulation === 'electric_funk' && bassMidi >= 48);
+      const bassDur =
+        track.articulation === 'electric_funk' || track.articulation === 'boss_lead'
+          ? stepDur * 0.92
+          : stepDur * (barStep === 0 ? 1.55 : 1.05);
+      const bassCutoff =
+        track.bassCutoffHz *
+        brightnessScale *
+        (track.articulation === 'electric_funk' && bassMidi >= 48 ? 1.85 : 1.0);
+
+      this.synth.scheduleMusicBass(
+        dest,
+        time,
+        hz,
+        bassDur,
+        track.bassGain * (isAccent ? 1.12 : 0.92),
+        track.bassWave,
+        bassCutoff
+      );
+
+      // Slap-bass bright thumb/pop transient on popped high notes in Track5
+      if (track.articulation === 'electric_funk' && bassMidi >= 48) {
+        this.synth.scheduleMusicNote(dest, time, hz * 2, 0.045, 'triangle', 0.048, 3200, 0.002);
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // 4. Atmospheric Bar Chord Pads
+    // ------------------------------------------------------------------------
+    if (barStep === 0 && track.pads && track.padGain > 0.001) {
+      const chord = track.pads[barIndex % track.pads.length];
+      if (chord && chord.length > 0) {
+        const freqs = chord.map((m) => midiToHz(m));
+        this.synth.schedulePadChord(
+          dest,
+          time,
+          freqs,
+          stepDur * (track.stepsPerBar - 0.15),
+          track.padGain,
+          track.padCutoffHz * brightnessScale
+        );
+      }
+    }
+
+    // ------------------------------------------------------------------------
+    // 5. Percussive Rhythm Layer
+    // ------------------------------------------------------------------------
+    const hit: PercHit = track.percussion[step] ?? 0;
+    if (hit !== 0 && track.percGain > 0.001) {
+      this.schedulePercussionHit(dest, hit, time, track.percGain, track.articulation);
+    }
+  }
+
+  private schedulePercussionHit(
+    dest: AudioNode,
+    hit: PercHit,
+    time: number,
+    gainScale: number,
+    articulation: JukeboxTrackData['articulation']
+  ): void {
+    if (!this.synth) return;
+    const isHeavy = articulation === 'boss_lead' || articulation === 'arp' || articulation === 'electric_funk';
+    const brightHat = articulation !== 'marimba';
+
+    switch (hit) {
+      case 1: // Kick
+        this.synth.scheduleMusicKick(dest, time, (isHeavy ? 0.165 : 0.13) * gainScale);
+        break;
+      case 2: // Snare
+        this.scheduleMusicSnare(dest, time, (isHeavy ? 0.115 : 0.085) * gainScale, articulation === 'boss_lead' || articulation === 'arp');
+        break;
+      case 3: // Closed hi-hat / brush
+        this.synth.scheduleMusicHat(dest, time, 0.036 * gainScale, brightHat);
+        break;
+      case 4: // Open hi-hat / icy shimmer cymbal
+        this.scheduleMusicOpenHat(dest, time, 0.048 * gainScale, articulation === 'icy_bell');
+        break;
+      case 5: // Kick + closed hat
+        this.synth.scheduleMusicKick(dest, time, (isHeavy ? 0.165 : 0.13) * gainScale);
+        this.synth.scheduleMusicHat(dest, time, 0.032 * gainScale, brightHat);
+        break;
+      case 6: // Snare + closed hat
+        this.scheduleMusicSnare(dest, time, (isHeavy ? 0.115 : 0.085) * gainScale, articulation === 'boss_lead' || articulation === 'arp');
+        this.synth.scheduleMusicHat(dest, time, 0.03 * gainScale, brightHat);
+        break;
+      case 7: // Rim / woodblock / metallic cavern tick
+        this.scheduleMusicRim(dest, time, 0.055 * gainScale, articulation === 'marimba');
+        break;
+    }
+  }
+
+  // ==========================================================================
+  // Pure Web Audio Snare, Open Hat & Rimshot Percussion Voices
+  // ==========================================================================
+
+  private createPercNoiseBuffer(ctx: AudioContext, durationSec: number): AudioBuffer {
+    const sr = ctx.sampleRate || 44100;
+    const len = Math.max(1024, Math.floor(sr * durationSec));
+    const buffer = ctx.createBuffer(1, len, sr);
+    const data = buffer.getChannelData(0);
+    let seed = 0x2f6e2b1d;
+    for (let i = 0; i < len; i++) {
+      seed = (Math.imul(seed, 1664525) + 1013904223) >>> 0;
+      data[i] = (seed / 0xffffffff) * 2 - 1;
+    }
+    return buffer;
+  }
+
+  private scheduleMusicSnare(dest: AudioNode, time: number, gain: number, punchy: boolean): void {
+    if (!this.ctx || !this.percNoiseBuffer) return;
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate || 44100;
+    const t0 = Math.max(ctx.currentTime, time);
+    const dur = punchy ? 0.11 : 0.085;
+    const t1 = t0 + dur;
+
+    // 1. Snare wire noise crack
+    const noiseSrc = ctx.createBufferSource();
+    noiseSrc.buffer = this.percNoiseBuffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'bandpass';
+    hp.frequency.setValueAtTime(safeFreq(punchy ? 2600 : 2100, sr), t0);
+    hp.Q.setValueAtTime(1.1, t0);
+
+    const nEnv = ctx.createGain();
+    nEnv.gain.setValueAtTime(0.0001, t0);
+    nEnv.gain.linearRampToValueAtTime(Math.max(0.0002, gain), t0 + 0.003);
+    nEnv.gain.exponentialRampToValueAtTime(0.0001, t1 - 0.004);
+    nEnv.gain.linearRampToValueAtTime(0, t1);
+
+    noiseSrc.connect(hp);
+    hp.connect(nEnv);
+    nEnv.connect(dest);
+    noiseSrc.start(t0, Math.random() * 0.25);
+    noiseSrc.stop(t1 + 0.01);
+    noiseSrc.onended = () => {
+      try {
+        noiseSrc.disconnect();
+        hp.disconnect();
+        nEnv.disconnect();
+      } catch {
+        // Ignore
+      }
+    };
+
+    // 2. Snare drum body tone
+    const body = ctx.createOscillator();
+    body.type = 'triangle';
+    body.frequency.setValueAtTime(punchy ? 215 : 185, t0);
+    body.frequency.exponentialRampToValueAtTime(108, t0 + 0.065);
+
+    const bEnv = ctx.createGain();
+    bEnv.gain.setValueAtTime(0.0001, t0);
+    bEnv.gain.linearRampToValueAtTime(Math.max(0.0002, gain * 0.85), t0 + 0.002);
+    bEnv.gain.exponentialRampToValueAtTime(0.0001, t0 + 0.068);
+    bEnv.gain.linearRampToValueAtTime(0, t0 + 0.072);
+
+    body.connect(bEnv);
+    bEnv.connect(dest);
+    body.start(t0);
+    body.stop(t0 + 0.08);
+    body.onended = () => {
+      try {
+        body.disconnect();
+        bEnv.disconnect();
+      } catch {
+        // Ignore
+      }
+    };
+  }
+
+  private scheduleMusicOpenHat(dest: AudioNode, time: number, gain: number, crystalline: boolean): void {
+    if (!this.ctx || !this.percNoiseBuffer) return;
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate || 44100;
+    const t0 = Math.max(ctx.currentTime, time);
+    const dur = crystalline ? 0.19 : 0.14;
+    const t1 = t0 + dur;
+
+    const src = ctx.createBufferSource();
+    src.buffer = this.percNoiseBuffer;
+    const hp = ctx.createBiquadFilter();
+    hp.type = 'highpass';
+    hp.frequency.setValueAtTime(safeFreq(crystalline ? 7200 : 5400, sr), t0);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.linearRampToValueAtTime(Math.max(0.0002, gain), t0 + 0.003);
+    env.gain.exponentialRampToValueAtTime(0.0001, t1 - 0.006);
+    env.gain.linearRampToValueAtTime(0, t1);
+
+    src.connect(hp);
+    hp.connect(env);
+    env.connect(dest);
+    src.start(t0, Math.random() * 0.2);
+    src.stop(t1 + 0.01);
+    src.onended = () => {
+      try {
+        src.disconnect();
+        hp.disconnect();
+        env.disconnect();
+      } catch {
+        // Ignore
+      }
+    };
+  }
+
+  private scheduleMusicRim(dest: AudioNode, time: number, gain: number, resonantCavern: boolean): void {
+    if (!this.ctx) return;
+    const ctx = this.ctx;
+    const sr = ctx.sampleRate || 44100;
+    const t0 = Math.max(ctx.currentTime, time);
+    const dur = resonantCavern ? 0.068 : 0.042;
+    const t1 = t0 + dur;
+
+    const osc = ctx.createOscillator();
+    osc.type = 'triangle';
+    osc.frequency.setValueAtTime(safeFreq(resonantCavern ? 1320 : 960, sr), t0);
+    osc.frequency.exponentialRampToValueAtTime(safeFreq(resonantCavern ? 880 : 520, sr), t1);
+
+    const env = ctx.createGain();
+    env.gain.setValueAtTime(0.0001, t0);
+    env.gain.linearRampToValueAtTime(Math.max(0.0002, gain), t0 + 0.002);
+    env.gain.exponentialRampToValueAtTime(0.0001, t1 - 0.003);
+    env.gain.linearRampToValueAtTime(0, t1);
+
+    osc.connect(env);
+    env.connect(dest);
+    osc.start(t0);
+    osc.stop(t1 + 0.008);
+    osc.onended = () => {
+      try {
+        osc.disconnect();
+        env.disconnect();
+      } catch {
+        // Ignore
+      }
+    };
   }
 }
