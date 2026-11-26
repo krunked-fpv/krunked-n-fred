@@ -30,11 +30,13 @@ import {
   PENGUIN_ANIM_COUNTS,
   drawPixelBox,
   drawPixelText,
+  drawStyledRopePoints,
   drawWrappedPixelText,
   measurePixelText,
   type PenguinAnimName,
   type SpriteRect,
 } from '../assets';
+import { LabAndBossRenderer } from './LabAndBossRenderer';
 import { ParticlePool } from './ParticlePool';
 import { WebGL2PixelBlitter } from './WebGL2PixelBlitter';
 
@@ -52,21 +54,6 @@ const BIOME_DISPLAY: Record<BiomeId, { label: string; accent: string }> = {
   summit: { label: 'SUMMIT', accent: PALETTE.LAB_AMBER },
   lab: { label: 'LABORATORY', accent: PALETTE.LAB_CYAN },
   boss: { label: 'BOSS ARENA', accent: PALETTE.KRUNKED_SCARF },
-};
-
-const ROPE_SKIN_COLORS: Record<RopeSkinId, readonly [string, string]> = {
-  Default: [PALETTE.ROPE_BASE, PALETTE.CLIFF_MID],
-  Animals: ['#df7126', '#8f563b'],
-  Box: ['#c78c5d', '#7a4537'],
-  Bread: ['#fbe4b2', '#c97e38'],
-  Fish: [PALETTE.LAB_CYAN, '#2b8ea8'],
-  Fruit: [PALETTE.PINE_MOSS, PALETTE.KRUNKED_SCARF],
-  Inverted: [PALETTE.BODY_MAIN, PALETTE.SNOW_BRIGHT],
-  Knight: [PALETTE.LAB_HIGHLIGHT, PALETTE.LAB_STEEL],
-  Pot: ['#8b9aa8', '#4a5568'],
-  Robot: [PALETTE.LAB_CYAN, PALETTE.LAB_STEEL],
-  Skeleton: [PALETTE.SNOW_BRIGHT, PALETTE.BODY_DARK],
-  Super: [PALETTE.LAB_AMBER, PALETTE.KRUNKED_SCARF],
 };
 
 interface CachedTree {
@@ -136,12 +123,24 @@ export class GameRenderer implements RendererModulePort {
   private readonly ctx: CanvasRenderingContext2D;
   private readonly packs: AssetPackManager;
   private readonly particles: ParticlePool;
+  private readonly labBoss: LabAndBossRenderer;
 
-  // Pre-allocated offscreen scratch canvases (allocated ONCE at init!)
+  // Pre-allocated offscreen scratch canvases & light stamps (allocated ONCE at init!)
   private readonly lightCanvas: HTMLCanvasElement;
   private readonly lightCtx: CanvasRenderingContext2D;
+  private readonly lightPunchCanvas: HTMLCanvasElement;
+  private readonly warmHaloCanvas: HTMLCanvasElement;
   private readonly tintCanvas: HTMLCanvasElement;
   private readonly tintCtx: CanvasRenderingContext2D;
+
+  // Pre-allocated zero-GC scratch buffers for render()
+  private readonly ropeXs = new Int16Array(64);
+  private readonly ropeYs = new Int16Array(64);
+  private readonly animScratch: { anim: PenguinAnimName; frame: number } = {
+    anim: 'Idle',
+    frame: 0,
+  };
+  private readonly assistScratch: string[] = [];
 
   // Pre-computed atmospheric backdrop elements
   private readonly stars: StarDef[];
@@ -174,6 +173,7 @@ export class GameRenderer implements RendererModulePort {
     this.ctx = this.blitter.getFramebufferContext();
     this.packs = packManager ?? new AssetPackManager();
     this.particles = new ParticlePool();
+    this.labBoss = new LabAndBossRenderer();
 
     // Pre-allocate 480x270 2D headlamp lightmap buffer ONCE
     this.lightCanvas = document.createElement('canvas');
@@ -185,6 +185,32 @@ export class GameRenderer implements RendererModulePort {
     }
     lCtx.imageSmoothingEnabled = false;
     this.lightCtx = lCtx;
+
+    // Pre-bake reusable radial light punch & warm glow stamps ONCE (ZERO per-frame gradient allocs!)
+    this.lightPunchCanvas = document.createElement('canvas');
+    this.lightPunchCanvas.width = 128;
+    this.lightPunchCanvas.height = 128;
+    const punchCtx = this.lightPunchCanvas.getContext('2d');
+    if (punchCtx) {
+      const grad = punchCtx.createRadialGradient(64, 64, 12, 64, 64, 64);
+      grad.addColorStop(0, 'rgba(0,0,0,1)');
+      grad.addColorStop(0.65, 'rgba(0,0,0,0.82)');
+      grad.addColorStop(1, 'rgba(0,0,0,0)');
+      punchCtx.fillStyle = grad;
+      punchCtx.fillRect(0, 0, 128, 128);
+    }
+
+    this.warmHaloCanvas = document.createElement('canvas');
+    this.warmHaloCanvas.width = 96;
+    this.warmHaloCanvas.height = 96;
+    const haloCtx = this.warmHaloCanvas.getContext('2d');
+    if (haloCtx) {
+      const g = haloCtx.createRadialGradient(48, 48, 2, 48, 48, 48);
+      g.addColorStop(0, 'rgba(255, 206, 120, 1)');
+      g.addColorStop(1, 'rgba(255, 184, 48, 0)');
+      haloCtx.fillStyle = g;
+      haloCtx.fillRect(0, 0, 96, 96);
+    }
 
     // Pre-allocate 32x32 penguin tint scratch buffer ONCE
     this.tintCanvas = document.createElement('canvas');
@@ -243,6 +269,14 @@ export class GameRenderer implements RendererModulePort {
 
   async loadCustomPackFromFiles(files: FileList | File[]): Promise<boolean> {
     return this.packs.loadCustomPackFromFiles(files);
+  }
+
+  getCustomAudioUrls(): Record<string, string> {
+    return this.packs.getCustomAudioUrls();
+  }
+
+  async clearCustomPack(): Promise<void> {
+    return this.packs.clearCustomPack();
   }
 
   consumeEvents(events: SimEvent[], state: SimState): void {
@@ -409,8 +443,8 @@ export class GameRenderer implements RendererModulePort {
     this.emitContinuousParticles(state, safeDt);
     this.particles.update(safeDt);
 
-    // 3. Layer 1: Parallax Sky & Biome Backdrop (Alpine <-> Dark Mines <-> Lab)
-    this.renderBackdrop(ctx, state);
+    // 3. Layer 1: Parallax Sky & Biome Backdrop (Alpine <-> Dark Mines <-> Crags <-> Summit <-> Lab)
+    this.renderBackdrop(ctx, state, level);
 
     // 4. Layer 2: World Scenery (Cabin, Pines, Lanterns, Summit Banner, Circuits, Boss)
     this.renderWorldScenery(ctx, state, level, levelCache);
@@ -418,10 +452,10 @@ export class GameRenderer implements RendererModulePort {
     // 5. Layer 3: Auto-Tiled Terrain & Slopes
     this.renderTerrain(ctx, level, levelCache);
 
-    // 6. Layer 4: Dynamic Hazards, Platforms, Collectibles, Checkpoint Flag & Signs
+    // 6. Layer 4: Dynamic Hazards, Platforms, Collectibles, NPCs, Checkpoint Flag & Signs
     this.renderDynamicEntities(ctx, state, level, alpha);
 
-    // 7. Layer 5: 35-Segment Braided Verlet Rope
+    // 7. Layer 5: 35-Segment Styled Verlet Rope (All 12 Rope Skins!)
     this.renderVerletRope(ctx, state, skins.rope, alpha);
 
     // 8. Layer 6: Penguins (Krunked & Fred) or Jeff + Animated 5-Node Scarves + Hands Overlay
@@ -446,8 +480,18 @@ export class GameRenderer implements RendererModulePort {
       this.renderCharlieRescue(ctx, state, p1x, p1y);
     }
 
+    // Bachicha Boss foreground sweeping laser beam & muzzle flare
+    if (state.boss.active && !state.boss.defeated && level.bossArena) {
+      this.labBoss.renderBossForeground(ctx, state, level, this.camX, this.camY, this.animClock);
+    }
+
     // 9. Layer 7: Pooled Particles (Snow, Sweat, Puffs, Wind Gale Lines, Debris, Stars, Confetti)
     this.particles.render(ctx, this.camX, this.camY);
+
+    // Summit blowing blizzard veil overlay (crisp atmospheric snowstorm depth)
+    if (state.currentBiome === 'summit') {
+      this.renderSummitBlizzardVeil(ctx, state);
+    }
 
     // 10. Layer 8: 2D Headlamp Lightmap (Dark Mines darkness + warm headlamp cones!)
     if (state.camera.darknessAlpha > 0.01) {
@@ -586,32 +630,42 @@ export class GameRenderer implements RendererModulePort {
   // ==========================================================================
 
   private emitContinuousParticles(state: SimState, dt: number): void {
-    // 1. Ambient alpine snow (outside deep mines / lab)
+    // 1. Ambient alpine snow (outside deep mines / lab; heavier squalls in Crags & Summit!)
     const inMinesOrLab =
       state.currentBiome === 'mines' ||
       state.currentBiome === 'lab' ||
       state.currentBiome === 'boss';
     if (!inMinesOrLab) {
-      const snowRate = state.windPhase === 'active' ? 36 : 16;
+      const isSummit = state.currentBiome === 'summit';
+      const isCrags = state.currentBiome === 'crags';
+      const baseSnow = isSummit ? 42 : isCrags ? 24 : 16;
+      const snowRate = state.windPhase === 'active' ? baseSnow + 24 : baseSnow;
+      const blownByWind = state.windActive || isSummit;
       this.snowAccum += snowRate * dt;
       while (this.snowAccum >= 1) {
         this.snowAccum -= 1;
-        this.particles.emitAmbientSnow(state.windActive, state.windDir);
+        this.particles.emitAmbientSnow(blownByWind, state.windDir);
       }
     }
 
-    // 2. Wind telegraph streaks & active gale lines
+    // 2. Wind telegraph streaks, active gale lines, & Summit ambient ice-draft streaks
     if (state.windPhase === 'telegraph') {
-      this.windParticleAccum += 10 * dt;
+      this.windParticleAccum += 12 * dt;
       while (this.windParticleAccum >= 1) {
         this.windParticleAccum -= 1;
         this.particles.emitWindStreak(state.windDir, true);
       }
     } else if (state.windPhase === 'active') {
-      this.windParticleAccum += 32 * dt;
+      this.windParticleAccum += (state.currentBiome === 'summit' ? 44 : 34) * dt;
       while (this.windParticleAccum >= 1) {
         this.windParticleAccum -= 1;
         this.particles.emitWindStreak(state.windDir, false);
+      }
+    } else if (state.currentBiome === 'summit' || state.currentBiome === 'crags') {
+      this.windParticleAccum += (state.currentBiome === 'summit' ? 14 : 7) * dt;
+      while (this.windParticleAccum >= 1) {
+        this.windParticleAccum -= 1;
+        this.particles.emitWindStreak(state.windDir, true);
       }
     }
 
@@ -643,56 +697,121 @@ export class GameRenderer implements RendererModulePort {
   // Layer 1: Parallax Alpine Sky, Mountains, Clouds & Dark Mines Strata
   // ==========================================================================
 
-  private renderBackdrop(ctx: CanvasRenderingContext2D, state: SimState): void {
-    const isLab = state.currentBiome === 'lab' || state.currentBiome === 'boss';
+  private renderBackdrop(ctx: CanvasRenderingContext2D, state: SimState, level: LevelData): void {
+    const biome = state.currentBiome;
+    const isLab = biome === 'lab' || biome === 'boss';
     if (isLab) {
-      this.renderLabBackdrop(ctx);
+      this.renderLabBackdrop(ctx, state);
       return;
     }
 
-    // Smooth blend into Dark Mines strata across Zone 2 (Y: 91..217)
-    const enterMines = clamp((this.camY - (WORLD.ZONE2_START_Y - 6)) / 12, 0, 1);
-    const exitMines = clamp((this.camY - (WORLD.ZONE3_START_Y - 6)) / 14, 0, 1);
-    const minesBlend = enterMines * (1 - exitMines);
+    // Determine Dark Mines subterranean blend (respects BOTH Time Trials and full Mountain altitude!)
+    let minesBlend = 0;
+    if (level.mode === 'time_trial') {
+      minesBlend = biome === 'mines' ? 1 : 0;
+    } else {
+      const enterMines = clamp((this.camY - (WORLD.ZONE2_START_Y - 6)) / 12, 0, 1);
+      const exitMines = clamp((this.camY - (WORLD.ZONE3_START_Y - 6)) / 14, 0, 1);
+      minesBlend = enterMines * (1 - exitMines);
+    }
 
-    // 1. Crisp stepped alpine twilight gradient (smooth horizon bands, no harsh mid-sky seam)
+    const isCrags =
+      biome === 'crags' ||
+      (level.mode !== 'time_trial' &&
+        this.camY >= WORLD.ZONE3_START_Y - 4 &&
+        this.camY < WORLD.ZONE4_START_Y - 6);
+    const isSummit =
+      biome === 'summit' ||
+      (level.mode !== 'time_trial' && this.camY >= WORLD.ZONE4_START_Y - 6);
+
+    // 1. Outdoor Biome Skies (Foothills Twilight vs Windy Crags Storm Dusk vs Frozen Summit Glacial Aurora)
     if (minesBlend < 0.99) {
-      ctx.fillStyle = PALETTE.SKY_DEEP;
-      ctx.fillRect(0, 0, W, 68);
-      ctx.fillStyle = '#1b1742';
-      ctx.fillRect(0, 68, W, 54);
-      ctx.fillStyle = PALETTE.NIGHT_PURPLE;
-      ctx.fillRect(0, 122, W, 64);
-      ctx.fillStyle = '#33285b';
-      ctx.fillRect(0, 186, W, H - 186);
+      if (isSummit) {
+        // Zone 4 Frozen Summit: deep stratospheric sapphire-glacial night sky
+        ctx.fillStyle = '#070b22';
+        ctx.fillRect(0, 0, W, 62);
+        ctx.fillStyle = '#0f1a42';
+        ctx.fillRect(0, 62, W, 56);
+        ctx.fillStyle = '#1b2f66';
+        ctx.fillRect(0, 118, W, 66);
+        ctx.fillStyle = '#345290';
+        ctx.fillRect(0, 184, W, H - 184);
 
-      // Subtle 1px pixel-art dither seams between sky bands
-      ctx.fillStyle = '#1b1742';
-      for (let x = 0; x < W; x += 4) ctx.fillRect(x, 67, 2, 1);
-      ctx.fillStyle = PALETTE.NIGHT_PURPLE;
-      for (let x = 2; x < W; x += 4) ctx.fillRect(x, 121, 2, 1);
-      ctx.fillStyle = '#33285b';
-      for (let x = 0; x < W; x += 4) ctx.fillRect(x, 185, 2, 1);
+        ctx.fillStyle = '#0f1a42';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 61, 2, 1);
+        ctx.fillStyle = '#1b2f66';
+        for (let x = 2; x < W; x += 4) ctx.fillRect(x, 117, 2, 1);
+        ctx.fillStyle = '#345290';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 183, 2, 1);
+      } else if (isCrags) {
+        // Zone 3 Windy Crags: stormy violet & crimson-dusk windswept sky
+        ctx.fillStyle = '#170e2e';
+        ctx.fillRect(0, 0, W, 60);
+        ctx.fillStyle = '#281745';
+        ctx.fillRect(0, 60, W, 56);
+        ctx.fillStyle = '#432056';
+        ctx.fillRect(0, 116, W, 64);
+        ctx.fillStyle = '#5e3263';
+        ctx.fillRect(0, 180, W, H - 180);
 
-      // High-altitude aurora shimmer above Crags/Summit
-      if (this.camY > WORLD.ZONE3_START_Y - 20) {
-        const auroraA = clamp((this.camY - (WORLD.ZONE3_START_Y - 20)) / 40, 0, 0.25);
-        ctx.globalAlpha = auroraA;
-        ctx.fillStyle = PALETTE.PINE_MOSS;
-        for (let i = 0; i < W; i += 8) {
-          const wave = Math.round(Math.sin(i * 0.025 + this.animClock * 0.9) * 14);
-          ctx.fillRect(i, 36 + wave, 8, 22);
+        ctx.fillStyle = '#281745';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 59, 2, 1);
+        ctx.fillStyle = '#432056';
+        for (let x = 2; x < W; x += 4) ctx.fillRect(x, 115, 2, 1);
+        ctx.fillStyle = '#5e3263';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 179, 2, 1);
+      } else {
+        // Village & Zone 1 Snowy Foothills: classic alpine indigo-purple twilight
+        ctx.fillStyle = PALETTE.SKY_DEEP;
+        ctx.fillRect(0, 0, W, 68);
+        ctx.fillStyle = '#1b1742';
+        ctx.fillRect(0, 68, W, 54);
+        ctx.fillStyle = PALETTE.NIGHT_PURPLE;
+        ctx.fillRect(0, 122, W, 64);
+        ctx.fillStyle = '#33285b';
+        ctx.fillRect(0, 186, W, H - 186);
+
+        ctx.fillStyle = '#1b1742';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 67, 2, 1);
+        ctx.fillStyle = PALETTE.NIGHT_PURPLE;
+        for (let x = 2; x < W; x += 4) ctx.fillRect(x, 121, 2, 1);
+        ctx.fillStyle = '#33285b';
+        for (let x = 0; x < W; x += 4) ctx.fillRect(x, 185, 2, 1);
+      }
+
+      // Vivid multi-ribbon Aurora Borealis curtains in Frozen Summit (subtle shimmer in upper Crags)
+      if (isSummit || isCrags) {
+        const auroraBase = isSummit ? 0.34 : 0.14;
+        for (let i = 0; i < W; i += 6) {
+          const w1 = Math.round(Math.sin(i * 0.022 + this.animClock * 1.1) * 14);
+          const w2 = Math.round(Math.cos(i * 0.017 - this.animClock * 0.85) * 10);
+          ctx.globalAlpha = auroraBase;
+          ctx.fillStyle = PALETTE.PINE_MOSS;
+          ctx.fillRect(i, 24 + w1, 6, isSummit ? 28 : 16);
+          if (isSummit) {
+            ctx.globalAlpha = 0.24;
+            ctx.fillStyle = PALETTE.LAB_CYAN;
+            ctx.fillRect(i, 42 + w2, 6, 18);
+            ctx.globalAlpha = 0.16;
+            ctx.fillStyle = PALETTE.ICE_MID;
+            ctx.fillRect(i, 16 + w2, 6, 14);
+          }
         }
         ctx.globalAlpha = 1;
       }
 
-      // Twinkling stars (parallax 0.04)
+      // Twinkling stars (extra bright crystal starfield on Summit)
       for (let i = 0; i < this.stars.length; i++) {
         const s = this.stars[i];
         const sx = (((Math.round(s.x - this.camX * 0.65) % W) + W) % W);
         const sy = (((Math.round(s.y + this.camY * 0.45) % 165) + 165) % 165);
-        const twinkle = Math.sin(this.animClock * 2.4 + s.phase) > 0.35;
-        ctx.fillStyle = s.bright && twinkle ? PALETTE.SNOW_BRIGHT : PALETTE.SNOW_LIGHT;
+        const twinkle = Math.sin(this.animClock * (isSummit ? 3.8 : 2.4) + s.phase) > 0.3;
+        ctx.fillStyle =
+          isSummit && s.bright
+            ? PALETTE.LAB_CYAN
+            : s.bright && twinkle
+              ? PALETTE.SNOW_BRIGHT
+              : PALETTE.SNOW_LIGHT;
         ctx.fillRect(sx, sy, s.bright && twinkle ? 2 : 1, 1);
       }
 
@@ -705,37 +824,68 @@ export class GameRenderer implements RendererModulePort {
         ctx.fillStyle = PALETTE.SNOW_BRIGHT;
         ctx.fillRect(moonX - 6, moonY - 8, 12, 16);
         ctx.fillRect(moonX - 8, moonY - 6, 16, 12);
-        // Crescent cutout
-        ctx.fillStyle = PALETTE.SKY_DEEP;
+        // Crescent cutout matching current biome zenith
+        ctx.fillStyle = isSummit ? '#070b22' : isCrags ? '#170e2e' : PALETTE.SKY_DEEP;
         ctx.fillRect(moonX - 2, moonY - 8, 11, 12);
         ctx.fillRect(moonX, moonY - 6, 11, 10);
       }
 
-      // Drifting pixel clouds
-      ctx.fillStyle = PALETTE.CLIFF_DARK;
+      // Drifting clouds (fast elongated storm shear clouds in Crags & Summit!)
+      const windMul = isCrags ? 4.4 : isSummit ? 3.2 : 1.0;
+      const windSign = isCrags || isSummit ? state.windDir : 1;
       for (let i = 0; i < this.clouds.length; i++) {
         const c = this.clouds[i];
+        const cw = isCrags ? c.w + 34 : isSummit ? c.w + 18 : c.w;
+        const ch = isCrags ? Math.max(6, c.h - 4) : c.h;
         const cx =
-          ((((Math.round(c.x + this.animClock * c.speed - this.camX * 2.2) % (W + 100)) +
-            (W + 100)) %
-            (W + 100)) -
-            50);
-        const cy = Math.round(c.y + this.camY * 0.65) % 195;
-        ctx.fillStyle = PALETTE.BODY_DARK;
-        ctx.fillRect(cx + 4, cy + 2, c.w - 8, c.h);
-        ctx.fillStyle = PALETTE.CLIFF_DARK;
-        ctx.fillRect(cx, cy + 4, c.w, c.h - 4);
-        ctx.fillStyle = PALETTE.CLIFF_MID;
-        ctx.fillRect(cx + 8, cy, c.w - 16, 4);
+          ((((Math.round(c.x + this.animClock * c.speed * windMul * windSign - this.camX * 2.2) %
+            (W + 130)) +
+            (W + 130)) %
+            (W + 130)) -
+            65);
+        const cy = Math.round(c.y + this.camY * 0.65) % 190;
+        ctx.fillStyle = isSummit ? '#274075' : isCrags ? '#351c4d' : PALETTE.BODY_DARK;
+        ctx.fillRect(cx + 4, cy + 2, cw - 8, ch);
+        ctx.fillStyle = isSummit ? '#4b6ca8' : isCrags ? '#542c66' : PALETTE.CLIFF_DARK;
+        ctx.fillRect(cx, cy + 4, cw, Math.max(2, ch - 4));
+        ctx.fillStyle = isSummit ? PALETTE.ICE_LIGHT : isCrags ? '#874c8c' : PALETTE.CLIFF_MID;
+        ctx.fillRect(cx + 8, cy, Math.max(8, cw - 16), 3);
       }
 
-      // Distant Mountain Range Layer A (distinct twilight ridge, parallax 0.14)
-      this.renderMountainRange(ctx, 0.14, 178, 62, 78, '#231e54', '#5c52a3');
-      // Midground Mountain Range Layer B (crisp snow-crested alpine peaks, parallax 0.28)
-      this.renderMountainRange(ctx, 0.28, 214, 52, 62, '#1d193d', PALETTE.SNOW_LIGHT);
+      // Sweeping mist ribbons in Windy Crags
+      if (isCrags) {
+        ctx.globalAlpha = 0.22;
+        ctx.fillStyle = PALETTE.ICE_TINT;
+        for (let r = 0; r < 5; r++) {
+          const rx =
+            (((Math.round(this.animClock * (75 + r * 18) * state.windDir + r * 97) % (W + 140)) +
+              (W + 140)) %
+              (W + 140)) -
+            70;
+          const ry = 82 + r * 34;
+          ctx.fillRect(rx, ry, 72 + r * 8, 2);
+          ctx.fillRect(rx + 12, ry + 3, 44, 1);
+        }
+        ctx.globalAlpha = 1;
+      }
+
+      // Biome-specific parallax mountain silhouettes!
+      if (isSummit) {
+        // Gleaming crystalline glacier peaks
+        this.renderMountainRange(ctx, 0.14, 174, 72, 74, '#1b2d59', PALETTE.ICE_LIGHT);
+        this.renderMountainRange(ctx, 0.28, 212, 60, 56, '#263f78', PALETTE.SNOW_BRIGHT);
+      } else if (isCrags) {
+        // Sharp jagged windswept violet crag spires
+        this.renderMountainRange(ctx, 0.16, 172, 82, 54, '#24143b', '#8757a3');
+        this.renderMountainRange(ctx, 0.3, 210, 68, 44, '#1b0f2e', PALETTE.ICE_TINT);
+      } else {
+        // Foothills twilight ridges & snow-crested peaks
+        this.renderMountainRange(ctx, 0.14, 178, 62, 78, '#231e54', '#5c52a3');
+        this.renderMountainRange(ctx, 0.28, 214, 52, 62, '#1d193d', PALETTE.SNOW_LIGHT);
+      }
 
       // Distant pine silhouette treeline near lower Foothills/Village
-      if (this.camY < 62) {
+      if (!isCrags && !isSummit && this.camY < 62) {
         const baseTreeY = Math.round(258 + this.camY * 2.2);
         if (baseTreeY < H + 40) {
           const offset = Math.round(this.camX * 6.5);
@@ -793,6 +943,25 @@ export class GameRenderer implements RendererModulePort {
     }
   }
 
+  private renderSummitBlizzardVeil(ctx: CanvasRenderingContext2D, state: SimState): void {
+    const galeBoost = state.windActive ? 1.0 : 0.45;
+    const speed = state.windActive ? 220 : 110;
+    const dir = state.windDir;
+    ctx.fillStyle = PALETTE.SNOW_LIGHT;
+    for (let i = 0; i < 6; i++) {
+      const x =
+        (((Math.round(this.animClock * (speed + i * 28) * dir + i * 83) % (W + 160)) +
+          (W + 160)) %
+          (W + 160)) -
+        80;
+      const y = (i * 44 + Math.round(Math.sin(this.animClock * 1.6 + i) * 8)) % H;
+      ctx.globalAlpha = (0.08 + (i & 1) * 0.05) * galeBoost;
+      ctx.fillRect(x, y, 78 + i * 10, 3);
+      ctx.fillRect(x + 14, y + 4, 48, 2);
+    }
+    ctx.globalAlpha = 1;
+  }
+
   private renderMountainRange(
     ctx: CanvasRenderingContext2D,
     parallax: number,
@@ -838,7 +1007,7 @@ export class GameRenderer implements RendererModulePort {
     }
   }
 
-  private renderLabBackdrop(ctx: CanvasRenderingContext2D): void {
+  private renderLabBackdrop(ctx: CanvasRenderingContext2D, state: SimState): void {
     ctx.fillStyle = PALETTE.LAB_DEEP;
     ctx.fillRect(0, 0, W, H);
 
@@ -852,18 +1021,33 @@ export class GameRenderer implements RendererModulePort {
     for (let y = oy; y < H + cell; y += cell) {
       for (let x = ox; x < W + cell; x += cell) {
         ctx.fillRect(x + 1, y + 1, cell - 2, cell - 2);
+        // Corner bulkhead rivets
+        ctx.fillStyle = PALETTE.LAB_STEEL;
+        ctx.fillRect(x + 3, y + 3, 1, 1);
+        ctx.fillRect(x + cell - 4, y + 3, 1, 1);
+        ctx.fillStyle = PALETTE.LAB_WALL;
       }
     }
 
     // Glowing vertical lab conduit rails
+    const isBossAlarm =
+      state.currentBiome === 'boss' && state.boss.active && !state.boss.defeated;
     const railStep = 120;
     const rxStart = -(((sx % railStep) + railStep) % railStep);
     for (let rx = rxStart; rx < W + railStep; rx += railStep) {
       ctx.fillStyle = PALETTE.LAB_STEEL;
       ctx.fillRect(rx, 0, 6, H);
-      ctx.fillStyle = PALETTE.LAB_CYAN;
-      ctx.globalAlpha = 0.35 + 0.15 * Math.sin(this.animClock * 3 + rx);
+      ctx.fillStyle = isBossAlarm ? PALETTE.KRUNKED_SCARF : PALETTE.LAB_CYAN;
+      ctx.globalAlpha = 0.35 + 0.18 * Math.sin(this.animClock * (isBossAlarm ? 6 : 3) + rx);
       ctx.fillRect(rx + 2, 0, 2, H);
+      ctx.globalAlpha = 1;
+    }
+
+    // Boss Arena subtle pulsing crimson alert wash when Bachicha is active
+    if (isBossAlarm) {
+      ctx.globalAlpha = 0.08 + 0.06 * Math.sin(this.animClock * 5.2);
+      ctx.fillStyle = PALETTE.KRUNKED_SCARF;
+      ctx.fillRect(0, 0, W, 64);
       ctx.globalAlpha = 1;
     }
   }
@@ -941,80 +1125,14 @@ export class GameRenderer implements RendererModulePort {
       );
     }
 
-    // 5. Lab Circuit Wires
-    for (let i = 0; i < state.circuits.length; i++) {
-      const circuit = state.circuits[i];
-      if (circuit.nodes.length < 2) continue;
-      for (let n = 0; n < circuit.nodes.length - 1; n++) {
-        const a = circuit.nodes[n];
-        const b = circuit.nodes[n + 1];
-        this.drawPixelLine(
-          ctx,
-          this.toScreenX(a.x),
-          this.toScreenY(a.y),
-          this.toScreenX(b.x),
-          this.toScreenY(b.y),
-          circuit.powered ? PALETTE.LAB_CYAN : PALETTE.LAB_STEEL,
-          2
-        );
-      }
+    // 5. Lab Circuit Wires (copper/slate dormant -> animated cyan pulse traces!)
+    if (state.circuits.length > 0) {
+      this.labBoss.renderCircuits(ctx, state, this.camX, this.camY, this.animClock);
     }
 
-    // 6. Boss Arena (Bachicha) if active
-    if (state.boss.active && level.bossArena) {
-      this.renderBossBackdrop(ctx, state, level);
-    }
-  }
-
-  private renderBossBackdrop(
-    ctx: CanvasRenderingContext2D,
-    state: SimState,
-    level: LevelData
-  ): void {
-    const arena = level.bossArena;
-    if (!arena) return;
-    const bossX = (arena.minX + arena.maxX) * 0.5;
-    const bossY = (arena.minY + arena.maxY) * 0.55;
-    const sx = this.toScreenX(bossX);
-    const sy = this.toScreenY(bossY);
-
-    // Draw unbroken glowing chains connecting boss core to anchor points
-    for (let i = 0; i < state.boss.chains.length; i++) {
-      const ch = state.boss.chains[i];
-      if (ch.broken) continue;
-      const cx = this.toScreenX(ch.x);
-      const cy = this.toScreenY(ch.y);
-      this.drawPixelLine(ctx, sx, sy, cx, cy, PALETTE.OUTLINE, 4);
-      this.drawPixelLine(ctx, sx, sy, cx, cy, PALETTE.LAB_HIGHLIGHT, 2);
-      ctx.fillStyle = PALETTE.LAB_AMBER;
-      ctx.fillRect(cx - 3, cy - 3, 6, 6);
-    }
-
-    // Boss core silhouette
-    const bob = Math.round(Math.sin(this.animClock * 3) * 3);
-    drawPixelBox(
-      ctx,
-      sx - 24,
-      sy - 20 + bob,
-      48,
-      40,
-      state.boss.defeated ? PALETTE.LAB_STEEL : PALETTE.LAB_WALL,
-      PALETTE.OUTLINE,
-      PALETTE.LAB_HIGHLIGHT
-    );
-    // Glowing cyclops visor
-    ctx.fillStyle = state.boss.defeated ? PALETTE.PINE_MOSS : PALETTE.KRUNKED_SCARF;
-    ctx.fillRect(sx - 12, sy - 6 + bob, 24, 8);
-    ctx.fillStyle = PALETTE.SNOW_BRIGHT;
-    ctx.fillRect(sx - 4, sy - 4 + bob, 8, 4);
-
-    // Sweeping laser beam when active & undefeated
-    if (!state.boss.defeated && state.boss.attackTimer > 0) {
-      const rad = state.boss.laserSweepAngle;
-      const lx = sx + Math.round(Math.cos(rad) * 240);
-      const ly = sy - Math.round(Math.sin(rad) * 240);
-      this.drawPixelLine(ctx, sx, sy + bob, lx, ly, PALETTE.KRUNKED_SCARF, 4);
-      this.drawPixelLine(ctx, sx, sy + bob, lx, ly, PALETTE.SNOW_BRIGHT, 2);
+    // 6. Boss Arena (Bachicha 4-Chain Mechanical-Yeti Golem Centerpiece)
+    if (level.bossArena) {
+      this.labBoss.renderBossBackdrop(ctx, state, level, this.camX, this.camY, this.animClock);
     }
   }
 
@@ -1230,108 +1348,50 @@ export class GameRenderer implements RendererModulePort {
       );
     }
 
-    // 5. Lab Tronchos (pistons)
-    for (let i = 0; i < state.tronchos.length; i++) {
-      const tr = state.tronchos[i];
-      const tx = lerp(tr.prevX, tr.x, alpha);
-      const ty = lerp(tr.prevY, tr.y, alpha);
-      const bx = this.toScreenX(tr.baseX + tr.w * 0.5);
-      const by = this.toScreenY(tr.baseY + tr.h * 0.5);
-      const cx = this.toScreenX(tx + tr.w * 0.5);
-      const cy = this.toScreenY(ty + tr.h * 0.5);
-      this.drawPixelLine(ctx, bx, by, cx, cy, PALETTE.OUTLINE, 6);
-      this.drawPixelLine(ctx, bx, by, cx, cy, PALETTE.LAB_STEEL, 4);
-
-      const sx = this.toScreenX(tx);
-      const syTop = this.toScreenY(ty + tr.h);
-      const cols = Math.max(1, Math.round(tr.w));
-      const rows = Math.max(1, Math.round(tr.h));
-      for (let r = 0; r < rows; r++) {
-        for (let c = 0; c < cols; c++) {
-          this.drawSprite(ctx, atlas.tronchoTile, sx + c * PPU, syTop + r * PPU, 'troncho');
-        }
-      }
+    // 5. Lab Tronchos (telescoping hydraulic pistons + caution block + cyan grab pads)
+    if (state.tronchos.length > 0) {
+      this.labBoss.renderTronchos(ctx, state, atlas, alpha, this.camX, this.camY, this.animClock);
     }
 
-    // 6. Owner-Exclusive ColorPlatforms
-    for (let i = 0; i < state.colorPlatforms.length; i++) {
-      const cp = state.colorPlatforms[i];
-      const sx = this.toScreenX(cp.x);
-      const syTop = this.toScreenY(cp.y + cp.h);
-      const pw = Math.max(PPU, Math.round(cp.w * PPU));
-      const ph = Math.max(8, Math.round(cp.h * PPU));
-      const col = cp.owner === 'krunked' ? PALETTE.LAB_KRUNKED : PALETTE.LAB_FRED;
-      if (cp.active) {
-        drawPixelBox(ctx, sx, syTop, pw, ph, col, PALETTE.OUTLINE, PALETTE.SNOW_BRIGHT);
-      } else {
-        ctx.globalAlpha = 0.35;
-        drawPixelBox(ctx, sx, syTop, pw, ph, PALETTE.LAB_DEEP, col);
-        ctx.globalAlpha = 1;
-      }
+    // 6. Owner-Exclusive ColorPlatforms (Krunked 'K' / Fred 'F' active & dashed inactive)
+    if (state.colorPlatforms.length > 0) {
+      this.labBoss.renderColorPlatforms(ctx, state, this.camX, this.camY, this.animClock);
     }
 
-    // 7. Circuit Buttons
-    for (let i = 0; i < state.buttons.length; i++) {
-      const btn = state.buttons[i];
-      const sx = this.toScreenX(btn.x);
-      const syBot = this.toScreenY(btn.y);
-      const pw = Math.max(12, Math.round(btn.w * PPU));
-      const capH = btn.pressed ? 2 : 5;
-      ctx.fillStyle = PALETTE.OUTLINE;
-      ctx.fillRect(sx - 1, syBot - 4, pw + 2, 4);
-      ctx.fillStyle = PALETTE.LAB_STEEL;
-      ctx.fillRect(sx, syBot - 3, pw, 3);
-      ctx.fillStyle = btn.pressed ? PALETTE.LAB_CYAN : PALETTE.KRUNKED_SCARF;
-      ctx.fillRect(sx + 2, syBot - 3 - capH, pw - 4, capH);
+    // 7. Circuit Buttons (switch lever, pressure plate, timed amber plate + countdown bar)
+    if (state.buttons.length > 0) {
+      this.labBoss.renderButtons(ctx, state, this.camX, this.camY, this.animClock);
     }
 
-    // 8. Lasers
-    for (let i = 0; i < state.lasers.length; i++) {
-      const l = state.lasers[i];
-      const x1 = this.toScreenX(l.x1);
-      const y1 = this.toScreenY(l.y1);
-      const x2 = this.toScreenX(l.x2);
-      const y2 = this.toScreenY(l.y2);
-      if (l.active) {
-        const pulse = Math.sin(this.animClock * 24 + i) > 0 ? 4 : 3;
-        this.drawPixelLine(ctx, x1, y1, x2, y2, PALETTE.KRUNKED_SCARF, pulse);
-        this.drawPixelLine(ctx, x1, y1, x2, y2, PALETTE.SNOW_BRIGHT, 1);
-      }
-      // Emitters
-      ctx.fillStyle = PALETTE.OUTLINE;
-      ctx.fillRect(x1 - 3, y1 - 3, 6, 6);
-      ctx.fillRect(x2 - 3, y2 - 3, 6, 6);
-      ctx.fillStyle = l.active ? PALETTE.LAB_AMBER : PALETTE.LAB_STEEL;
-      ctx.fillRect(x1 - 2, y1 - 2, 4, 4);
-      ctx.fillRect(x2 - 2, y2 - 2, 4, 4);
+    // 8. Lasers (steel emitters + flickering plasma core + endpoint impact flares)
+    if (state.lasers.length > 0) {
+      this.labBoss.renderLasers(ctx, state, this.camX, this.camY, this.animClock);
     }
 
-    // 9. Collectibles (Polaroids, Manual Scrolls, Arctic Seals, NPCs)
+    // 9. Collectibles (Polaroids & Manual Scrolls)
     for (let i = 0; i < state.collectibles.length; i++) {
       const c = state.collectibles[i];
+      if (c.kind !== 'photo' && c.kind !== 'manual') continue;
       if (c.collected) continue;
       const sx = this.toScreenX(c.x);
       const bob = Math.round(Math.sin(this.animClock * 3.4 + c.x * 1.3) * 2);
       const sy = this.toScreenY(c.y) + bob;
       if (sx < -24 || sx > W + 24 || sy < -24 || sy > H + 24) continue;
 
-      // Subtle glowing halo pixel behind collectibles
-      if (c.kind === 'photo' || c.kind === 'manual') {
-        const glint = Math.floor(this.animClock * 4 + i) & 1;
-        ctx.fillStyle = c.kind === 'photo' ? PALETTE.LAB_AMBER : PALETTE.LAB_CYAN;
-        ctx.fillRect(sx - 9 - glint, sy - 1, 2, 2);
-        ctx.fillRect(sx + 8 + glint, sy - 1, 2, 2);
-      }
+      const glint = Math.floor(this.animClock * 4 + i) & 1;
+      ctx.fillStyle = c.kind === 'photo' ? PALETTE.LAB_AMBER : PALETTE.LAB_CYAN;
+      ctx.fillRect(sx - 9 - glint, sy - 1, 2, 2);
+      ctx.fillRect(sx + 8 + glint, sy - 1, 2, 2);
 
       if (c.kind === 'photo') {
         this.drawSprite(ctx, atlas.polaroidSprite, sx - 8, sy - 8, 'collectible_photo');
-      } else if (c.kind === 'manual') {
-        this.drawSprite(ctx, atlas.manualSprite, sx - 8, sy - 8, 'collectible_manual');
       } else {
-        const f = Math.floor(this.animClock * 2.5 + i) & 1;
-        this.drawSprite(ctx, atlas.sealFrames[f], sx - 10, sy - 10, `seal_${f}`);
+        this.drawSprite(ctx, atlas.manualSprite, sx - 8, sy - 8, 'collectible_manual');
       }
     }
+
+    // 9B. World NPCs (Bouncing & Waving Baby Seals, Peeking Mines Moles, Cozy Village Penguins)
+    this.labBoss.renderWorldNpcs(ctx, state, level, atlas, this.camX, this.camY, this.animClock);
 
     // 10. Placed Assist Checkpoint Flag
     if (state.checkpoint.placed) {
@@ -1343,7 +1403,7 @@ export class GameRenderer implements RendererModulePort {
   }
 
   // ==========================================================================
-  // Layer 5: 35-Segment Braided Verlet Rope
+  // Layer 5: 35-Segment Styled Verlet Rope (All 12 Rope Skins — Zero Alloc)
   // ==========================================================================
 
   private renderVerletRope(
@@ -1353,36 +1413,17 @@ export class GameRenderer implements RendererModulePort {
     alpha: number
   ): void {
     const nodes = state.rope.nodes;
-    if (nodes.length < 2) return;
+    const count = Math.min(nodes.length, this.ropeXs.length);
+    if (count < 2) return;
 
-    const skinPair = ROPE_SKIN_COLORS[ropeSkin] ?? ROPE_SKIN_COLORS.Default;
+    for (let i = 0; i < count; i++) {
+      const n = nodes[i];
+      this.ropeXs[i] = this.toScreenX(lerp(n.prevX, n.x, alpha));
+      this.ropeYs[i] = this.toScreenY(lerp(n.prevY, n.y, alpha));
+    }
+
     const isTaut = state.rope.taut || state.rope.tension > 0.72;
-    const colA = isTaut ? PALETTE.LAB_AMBER : skinPair[0];
-    const colB = isTaut ? PALETTE.SNOW_BRIGHT : skinPair[1];
-
-    // Pass 1: Crisp dark #222034 outer rope casing
-    ctx.fillStyle = PALETTE.OUTLINE;
-    for (let i = 0; i < nodes.length - 1; i++) {
-      const a = nodes[i];
-      const b = nodes[i + 1];
-      const ax = this.toScreenX(lerp(a.prevX, a.x, alpha));
-      const ay = this.toScreenY(lerp(a.prevY, a.y, alpha));
-      const bx = this.toScreenX(lerp(b.prevX, b.x, alpha));
-      const by = this.toScreenY(lerp(b.prevY, b.y, alpha));
-      this.drawPixelLine(ctx, ax, ay, bx, by, PALETTE.OUTLINE, 3);
-    }
-
-    // Pass 2: Alternating braided links along all 35 Verlet segments!
-    for (let i = 0; i < nodes.length - 1; i++) {
-      const a = nodes[i];
-      const b = nodes[i + 1];
-      const ax = this.toScreenX(lerp(a.prevX, a.x, alpha));
-      const ay = this.toScreenY(lerp(a.prevY, a.y, alpha));
-      const bx = this.toScreenX(lerp(b.prevX, b.x, alpha));
-      const by = this.toScreenY(lerp(b.prevY, b.y, alpha));
-      const braidColor = (i & 1) === 0 ? colA : colB;
-      this.drawPixelLine(ctx, ax, ay, bx, by, braidColor, 1);
-    }
+    drawStyledRopePoints(ctx, this.ropeXs, this.ropeYs, count, ropeSkin, this.animClock, isTaut);
   }
 
   // ==========================================================================
@@ -1415,7 +1456,9 @@ export class GameRenderer implements RendererModulePort {
             : p.emote === 'rps_paper'
               ? 3
               : 4;
-      return { anim, frame: rpsFrame };
+      this.animScratch.anim = anim;
+      this.animScratch.frame = rpsFrame;
+      return this.animScratch;
     } else {
       switch (p.action) {
         case 'Walk':
@@ -1470,7 +1513,9 @@ export class GameRenderer implements RendererModulePort {
 
     const count = PENGUIN_ANIM_COUNTS[anim];
     const frame = count <= 1 ? 0 : Math.floor(Math.max(0, p.animTime) * fps) % count;
-    return { anim, frame };
+    this.animScratch.anim = anim;
+    this.animScratch.frame = frame;
+    return this.animScratch;
   }
 
   private renderPenguin(
@@ -1508,49 +1553,18 @@ export class GameRenderer implements RendererModulePort {
       `${customPrefix}_hands_${anim.toLowerCase()}_${frame}`
     );
 
-    const drawLayered = (isHands: boolean): void => {
-      const rect = isHands ? handRect : bodyRect;
-      const customImg = isHands ? customHand : customBody;
-      const needsRedTint = !isHands && p.action === 'Grab' && p.grabRedTint > 0.02;
-
-      ctx.save();
-      ctx.translate(sx, sy);
-      if (swingRad !== 0) {
-        ctx.rotate(swingRad);
-      }
-      if (flipX) {
-        ctx.scale(-1, 1);
-      }
-
-      if (needsRedTint) {
-        // Pre-allocated 32x32 tintCanvas (ZERO per-frame allocation!)
-        const tCtx = this.tintCtx;
-        tCtx.globalCompositeOperation = 'source-over';
-        tCtx.clearRect(0, 0, 32, 32);
-        if (customImg) {
-          tCtx.drawImage(customImg, 0, 0, 32, 32);
-        } else {
-          tCtx.drawImage(rect.sheet, rect.x, rect.y, rect.w, rect.h, 0, 0, 32, 32);
-        }
-        tCtx.globalCompositeOperation = 'source-atop';
-        const urgentPulse =
-          p.grabRedTint > 0.65 ? 0.14 * Math.sin(this.animClock * 18) : 0;
-        const alphaTint = clamp(p.grabRedTint * 0.68 + urgentPulse, 0, 0.82);
-        tCtx.fillStyle = `rgba(209, 22, 81, ${alphaTint.toFixed(3)})`;
-        tCtx.fillRect(0, 0, 32, 32);
-        tCtx.globalCompositeOperation = 'source-over';
-        ctx.drawImage(this.tintCanvas, -16, -16);
-      } else if (customImg) {
-        ctx.drawImage(customImg, -16, -16, 32, 32);
-      } else {
-        ctx.drawImage(rect.sheet, rect.x, rect.y, rect.w, rect.h, -16, -16, 32, 32);
-      }
-      ctx.restore();
-    };
-
-    // Body layer then separate Hands overlay layer!
-    drawLayered(false);
-    drawLayered(true);
+    // Body layer then separate Hands overlay layer (zero per-frame closures!)
+    this.drawPenguinLayer(
+      ctx,
+      bodyRect,
+      customBody,
+      sx,
+      sy,
+      swingRad,
+      flipX,
+      p.action === 'Grab' && p.grabRedTint > 0.02 ? p.grabRedTint : 0
+    );
+    this.drawPenguinLayer(ctx, handRect, customHand, sx, sy, swingRad, flipX, 0);
 
     // 3. Wall-cling mini stamina bar right beside clinging penguin
     if (p.action === 'Grab' && p.grabMaxStamina > 0) {
@@ -1722,45 +1736,33 @@ export class GameRenderer implements RendererModulePort {
     lCtx.fillStyle = `rgba(12, 8, 24, ${(dark * 0.92).toFixed(3)})`;
     lCtx.fillRect(0, 0, W, H);
 
-    // 2. Carve radial light cones via destination-out
+    // 2. Carve radial light cones via destination-out using pre-baked stamp (ZERO per-frame allocs!)
     lCtx.globalCompositeOperation = 'destination-out';
-
-    const punchLight = (sx: number, sy: number, rInner: number, rOuter: number) => {
-      if (sx + rOuter < 0 || sx - rOuter > W || sy + rOuter < 0 || sy - rOuter > H) return;
-      const grad = lCtx.createRadialGradient(sx, sy, rInner, sx, sy, rOuter);
-      grad.addColorStop(0, 'rgba(0,0,0,1)');
-      grad.addColorStop(0.65, 'rgba(0,0,0,0.82)');
-      grad.addColorStop(1, 'rgba(0,0,0,0)');
-      lCtx.fillStyle = grad;
-      lCtx.beginPath();
-      lCtx.arc(sx, sy, rOuter, 0, Math.PI * 2);
-      lCtx.fill();
-    };
 
     const flicker = Math.sin(this.animClock * 11) * 1.5;
 
     // Krunked (P1) body aura + forward headlamp cone
     const p1sx = this.toScreenX(p1x);
     const p1sy = this.toScreenY(p1y);
-    punchLight(p1sx, p1sy - 4, 14, 68 + flicker);
-    punchLight(p1sx + state.p1.facing * 26, p1sy - 6, 8, 52 + flicker);
+    this.punchLightStamp(lCtx, p1sx, p1sy - 4, 68 + flicker);
+    this.punchLightStamp(lCtx, p1sx + state.p1.facing * 26, p1sy - 6, 52 + flicker);
 
     // Fred (P2) or Jeff aura + headlamp cone
     const p2sx = this.toScreenX(p2x);
     const p2sy = this.toScreenY(p2y);
     if (state.jeff.active) {
-      punchLight(p2sx, p2sy, 8, 46);
+      this.punchLightStamp(lCtx, p2sx, p2sy, 46);
     } else {
-      punchLight(p2sx, p2sy - 4, 14, 68 - flicker);
-      punchLight(p2sx + state.p2.facing * 26, p2sy - 6, 8, 52 - flicker);
+      this.punchLightStamp(lCtx, p2sx, p2sy - 4, 68 - flicker);
+      this.punchLightStamp(lCtx, p2sx + state.p2.facing * 26, p2sy - 6, 52 - flicker);
     }
 
     // Placed Assist Flag warm beacon
     if (state.checkpoint.placed) {
-      punchLight(
+      this.punchLightStamp(
+        lCtx,
         this.toScreenX(state.checkpoint.x),
         this.toScreenY(state.checkpoint.y + 0.8),
-        10,
         56
       );
     }
@@ -1770,33 +1772,88 @@ export class GameRenderer implements RendererModulePort {
       const l = cache.lanterns[i];
       const lx = this.toScreenX(l.x);
       const ly = this.toScreenY(l.y);
-      punchLight(lx, ly, 8, 48 + Math.sin(this.animClock * 8 + i) * 2);
+      this.punchLightStamp(lCtx, lx, ly, 48 + Math.sin(this.animClock * 8 + i) * 2);
     }
 
     // 3. Composite carved darkness onto 480x270 framebuffer
     lCtx.globalCompositeOperation = 'source-over';
     ctx.drawImage(this.lightCanvas, 0, 0);
 
-    // 4. Add warm golden headlamp glow halos!
-    const drawWarmHalo = (sx: number, sy: number, radius: number, strength: number) => {
-      if (sx + radius < 0 || sx - radius > W || sy + radius < 0 || sy - radius > H) return;
-      const g = ctx.createRadialGradient(sx, sy, 2, sx, sy, radius);
-      g.addColorStop(0, `rgba(255, 206, 120, ${(strength * dark).toFixed(3)})`);
-      g.addColorStop(1, 'rgba(255, 184, 48, 0)');
-      ctx.fillStyle = g;
-      ctx.beginPath();
-      ctx.arc(sx, sy, radius, 0, Math.PI * 2);
-      ctx.fill();
-    };
-
-    drawWarmHalo(p1sx + state.p1.facing * 12, p1sy - 5, 42, 0.16);
+    // 4. Add warm golden headlamp glow halos using pre-baked stamp (ZERO per-frame allocs!)
+    this.drawWarmHaloStamp(ctx, p1sx + state.p1.facing * 12, p1sy - 5, 42, 0.16 * dark);
     if (!state.jeff.active) {
-      drawWarmHalo(p2sx + state.p2.facing * 12, p2sy - 5, 42, 0.16);
+      this.drawWarmHaloStamp(ctx, p2sx + state.p2.facing * 12, p2sy - 5, 42, 0.16 * dark);
     }
     for (let i = 0; i < cache.lanterns.length; i++) {
       const l = cache.lanterns[i];
-      drawWarmHalo(this.toScreenX(l.x), this.toScreenY(l.y), 30, 0.18);
+      this.drawWarmHaloStamp(ctx, this.toScreenX(l.x), this.toScreenY(l.y), 30, 0.18 * dark);
     }
+  }
+
+  private punchLightStamp(
+    lCtx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    rOuter: number
+  ): void {
+    if (sx + rOuter < 0 || sx - rOuter > W || sy + rOuter < 0 || sy - rOuter > H) return;
+    lCtx.drawImage(this.lightPunchCanvas, sx - rOuter, sy - rOuter, rOuter * 2, rOuter * 2);
+  }
+
+  private drawWarmHaloStamp(
+    ctx: CanvasRenderingContext2D,
+    sx: number,
+    sy: number,
+    radius: number,
+    alpha: number
+  ): void {
+    if (sx + radius < 0 || sx - radius > W || sy + radius < 0 || sy - radius > H) return;
+    ctx.globalAlpha = alpha;
+    ctx.drawImage(this.warmHaloCanvas, sx - radius, sy - radius, radius * 2, radius * 2);
+    ctx.globalAlpha = 1;
+  }
+
+  private drawPenguinLayer(
+    ctx: CanvasRenderingContext2D,
+    rect: SpriteRect,
+    customImg: HTMLImageElement | null,
+    sx: number,
+    sy: number,
+    swingRad: number,
+    flipX: boolean,
+    grabRedTint: number
+  ): void {
+    ctx.save();
+    ctx.translate(sx, sy);
+    if (swingRad !== 0) {
+      ctx.rotate(swingRad);
+    }
+    if (flipX) {
+      ctx.scale(-1, 1);
+    }
+
+    if (grabRedTint > 0.02) {
+      const tCtx = this.tintCtx;
+      tCtx.globalCompositeOperation = 'source-over';
+      tCtx.clearRect(0, 0, 32, 32);
+      if (customImg) {
+        tCtx.drawImage(customImg, 0, 0, 32, 32);
+      } else {
+        tCtx.drawImage(rect.sheet, rect.x, rect.y, rect.w, rect.h, 0, 0, 32, 32);
+      }
+      tCtx.globalCompositeOperation = 'source-atop';
+      const urgentPulse = grabRedTint > 0.65 ? 0.14 * Math.sin(this.animClock * 18) : 0;
+      const alphaTint = clamp(grabRedTint * 0.68 + urgentPulse, 0, 0.82);
+      tCtx.fillStyle = `rgba(209, 22, 81, ${alphaTint.toFixed(3)})`;
+      tCtx.fillRect(0, 0, 32, 32);
+      tCtx.globalCompositeOperation = 'source-over';
+      ctx.drawImage(this.tintCanvas, -16, -16);
+    } else if (customImg) {
+      ctx.drawImage(customImg, -16, -16, 32, 32);
+    } else {
+      ctx.drawImage(rect.sheet, rect.x, rect.y, rect.w, rect.h, -16, -16, 32, 32);
+    }
+    ctx.restore();
   }
 
   // ==========================================================================
@@ -1992,8 +2049,9 @@ export class GameRenderer implements RendererModulePort {
       rightY += 14;
     }
 
-    // Active Assist badges (only shown when enabled)
-    const assistTags: string[] = [];
+    // Active Assist badges (only shown when enabled — reuses scratch array!)
+    const assistTags = this.assistScratch;
+    assistTags.length = 0;
     if (state.assist.infiniteJumps) assistTags.push('INF');
     if (state.assist.pullingRope) assistTags.push('PULL');
     if (state.assist.checkPoints) assistTags.push('FLAG');
@@ -2021,6 +2079,11 @@ export class GameRenderer implements RendererModulePort {
         });
         badgeX -= 3;
       }
+    }
+
+    // 3B. Bachicha 4-Chain Boss Arena Status Bar
+    if (state.boss.active && !state.boss.defeated) {
+      this.labBoss.renderBossHud(ctx, state, this.animClock);
     }
 
     // 3. Top-Center: Wind Telegraph / Active Gale Warning Banner
