@@ -1,19 +1,16 @@
 // ============================================================================
-// Krunked & Fred — Pixel UI Overlay & F9 Playtest Drawer (MenuManager)
+// Krunked & Fred — Pixel UI Overlay, Meta Screen Router & F9 Playtest Drawer
 // 100% navigable via Keyboard, Mouse, and Gamepad (D-Pad/Stick + A/B/Start/LB/RB).
 // Clean-room Krunked & Fred branding only.
 // ============================================================================
 
 import {
-  COOP_SKINS,
-  JEFF_SKINS,
-  JUKEBOX_TRACKS,
+  CATALOG_COUNTS,
   PALETTE,
-  ROPE_SKINS,
-  TIME_TRIAL_MEDALS,
   type AssistSettings,
   type BiomeId,
   type DebugMetrics,
+  type EmoteType,
   type GameMode,
   type InputGlyphStyle,
   type MenuScreen,
@@ -23,7 +20,17 @@ import {
   type TargetFps,
   type TouchMode,
 } from '../contracts';
+import { JUKEBOX_TRACK_CATALOG } from '../data/catalogs';
 import type { MenuNavAction } from '../input/KeyboardDriver';
+import type { OnlineCoopStatusSnapshot } from '../net';
+import {
+  MetaScreens,
+  type MetaArtProvider,
+  type MetaRenderContext,
+  type ToastNotification,
+} from './MetaScreens';
+
+export type { MetaArtProvider, ToastNotification };
 
 export interface MenuCallbacks {
   onStartMode(mode: GameMode, timeTrialIndex?: number): void;
@@ -36,9 +43,16 @@ export interface MenuCallbacks {
   onLoadCustomPackFiles(files: FileList | File[]): Promise<boolean>;
   onSetAssist(partial: Partial<AssistSettings>): void;
   onWarpToZone(zone: BiomeId): void;
+  onBreakBossChain(): void;
   onStepTicks(count: number): void;
   onResetSave(): void;
   onOpenOnlineCoop(role: 'host' | 'client', channelName: string): void;
+  onCreateWebRtcOffer(): Promise<string>;
+  onAcceptWebRtcAnswer(answerCode: string): Promise<void>;
+  onAcceptWebRtcOffer(offerCode: string): Promise<string>;
+  onDisconnectOnline(): void;
+  onTriggerEmote(who: 'p1' | 'p2', emote: EmoteType): void;
+  onUnlockAudio(): void;
   onUiSound(kind: 'move' | 'confirm' | 'cancel' | 'toggle'): void;
   onPlayAgain(): void;
 }
@@ -52,6 +66,7 @@ export interface MenuRenderContext {
   hasCustomPack: boolean;
   packStatusText: string;
   inActiveRun: boolean;
+  onlineStatus: OnlineCoopStatusSnapshot;
 }
 
 interface MenuItemDef {
@@ -74,34 +89,39 @@ const TOUCH_MODE_LABELS: Record<TouchMode, string> = {
   on: 'Always On',
 };
 
-function formatTime(sec: number): string {
-  const safe = Math.max(0, Number.isFinite(sec) ? sec : 0);
-  const mins = Math.floor(safe / 60);
-  const rem = safe - mins * 60;
-  const whole = Math.floor(rem);
-  const hundredths = Math.floor((rem - whole) * 100);
-  return `${String(mins).padStart(2, '0')}:${String(whole).padStart(2, '0')}.${String(hundredths).padStart(2, '0')}`;
-}
-
 function getFooterPrompt(glyph: InputGlyphStyle, screen: MenuScreen): string {
   if (glyph === 'touch') {
-    return 'TAP AN OPTION TO SELECT  •  TAP VALUE TO ADJUST';
+    return 'TAP AN OPTION TO SELECT  •  TAP TABS OR VALUES TO ADJUST';
   }
+  const hasTabs =
+    screen === 'skin_closet' ||
+    screen === 'achievements' ||
+    screen === 'online_lobby' ||
+    screen === 'controls_remap' ||
+    screen === 'manual' ||
+    screen === 'album';
   const hasAdjust = screen === 'options' || screen === 'skin_closet';
+
   if (glyph === 'xbox') {
+    if (hasTabs) return '[D-PAD / LS] Move   [A] Select   [LB / RB] Tabs   [B] Back';
     return hasAdjust
       ? '[D-PAD / LS] Move   [A] Select   [◀ ▶] Adjust   [B] Back'
       : '[D-PAD / LS] Move   [A] Select   [B] Back   [START] Pause';
   }
   if (glyph === 'playstation') {
+    if (hasTabs) return '[D-PAD / LS] Move   [✕] Select   [L1 / R1] Tabs   [○] Back';
     return hasAdjust
       ? '[D-PAD / LS] Move   [✕] Select   [◀ ▶] Adjust   [○] Back'
       : '[D-PAD / LS] Move   [✕] Select   [○] Back   [OPTIONS] Pause';
   }
   if (glyph === 'switch') {
+    if (hasTabs) return '[D-PAD / LS] Move   [B] Select   [L / R] Tabs   [A] Back';
     return hasAdjust
       ? '[D-PAD / LS] Move   [B] Select   [◀ ▶] Adjust   [A] Back'
       : '[D-PAD / LS] Move   [B] Select   [A] Back   [+] Pause';
+  }
+  if (hasTabs) {
+    return '[↑↓←→ / WASD] Move   [ENTER / SPACE] Select   [Q / E] Tabs   [ESC] Back';
   }
   return hasAdjust
     ? '[↑↓ / W S] Move   [ENTER / SPACE] Select   [←→ / A D] Adjust   [ESC] Back'
@@ -133,7 +153,7 @@ function injectUiStyles(): void {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  padding: 18px;
+  padding: 16px;
   font-family: 'Courier New', Courier, monospace;
   color: ${PALETTE.BELLY_WHITE};
   pointer-events: auto;
@@ -152,11 +172,11 @@ function injectUiStyles(): void {
     rgba(19, 18, 58, 0.72) 100%
   );
   justify-content: space-between;
-  padding: 28px 20px 18px;
+  padding: 20px 18px 14px;
 }
 
 .kf-ui-root.screen-modal {
-  background: rgba(19, 18, 58, 0.68);
+  background: rgba(19, 18, 58, 0.72);
 }
 
 .kf-title-header {
@@ -164,12 +184,12 @@ function injectUiStyles(): void {
   flex-direction: column;
   align-items: center;
   text-align: center;
-  gap: 8px;
-  margin-top: 6px;
+  gap: 6px;
+  margin-top: 2px;
 }
 
 .kf-logo {
-  font-size: clamp(28px, 6vw, 54px);
+  font-size: clamp(26px, 5.6vw, 52px);
   font-weight: 900;
   letter-spacing: 3px;
   line-height: 1;
@@ -188,7 +208,7 @@ function injectUiStyles(): void {
 .kf-logo-f { color: ${PALETTE.FRED_SCARF}; }
 
 .kf-subtitle {
-  font-size: clamp(11px, 1.8vw, 14px);
+  font-size: clamp(10px, 1.7vw, 13px);
   font-weight: 700;
   color: ${PALETTE.SNOW_LIGHT};
   text-transform: uppercase;
@@ -197,44 +217,45 @@ function injectUiStyles(): void {
 }
 
 .kf-panel {
-  width: min(540px, 94vw);
-  max-height: 82vh;
+  width: min(560px, 94vw);
+  max-height: 86vh;
   display: flex;
   flex-direction: column;
-  background: rgba(19, 18, 58, 0.92);
+  background: rgba(19, 18, 58, 0.94);
   border: 3px solid ${PALETTE.OUTLINE};
   box-shadow:
     inset 0 0 0 2px ${PALETTE.CLIFF_MID},
     0 6px 0 ${PALETTE.OUTLINE};
-  padding: 18px 18px 14px;
-  gap: 12px;
+  padding: 15px 16px 12px;
+  gap: 10px;
 }
 
 .kf-title-card {
-  width: min(380px, 92vw);
+  width: min(430px, 92vw);
   display: flex;
   flex-direction: column;
-  gap: 8px;
-  background: rgba(19, 18, 58, 0.84);
+  gap: 6px;
+  background: rgba(19, 18, 58, 0.86);
   border: 3px solid ${PALETTE.OUTLINE};
   box-shadow:
     inset 0 0 0 2px ${PALETTE.CLIFF_DARK},
     0 5px 0 ${PALETTE.OUTLINE};
-  padding: 14px;
+  padding: 12px;
 }
 
 .kf-panel-title {
-  font-size: 20px;
+  font-size: 18px;
   font-weight: 900;
-  letter-spacing: 2px;
+  letter-spacing: 1.8px;
   text-transform: uppercase;
   color: ${PALETTE.BELLY_WHITE};
   text-shadow: 2px 2px 0 ${PALETTE.OUTLINE};
   border-bottom: 2px solid ${PALETTE.CLIFF_DARK};
-  padding-bottom: 8px;
+  padding-bottom: 7px;
   display: flex;
   justify-content: space-between;
   align-items: center;
+  gap: 8px;
 }
 
 .kf-panel-note {
@@ -246,7 +267,7 @@ function injectUiStyles(): void {
 .kf-menu-list {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   overflow-y: auto;
   max-height: 54vh;
   padding-right: 4px;
@@ -258,13 +279,13 @@ function injectUiStyles(): void {
   align-items: center;
   justify-content: space-between;
   gap: 10px;
-  padding: 9px 12px;
+  padding: 8px 11px;
   background: rgba(43, 29, 65, 0.9);
   color: ${PALETTE.BELLY_WHITE};
   border: 2px solid ${PALETTE.OUTLINE};
   box-shadow: inset 0 0 0 1px rgba(109, 88, 183, 0.45);
   font-family: 'Courier New', Courier, monospace;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 700;
   text-align: left;
   cursor: pointer;
@@ -280,8 +301,8 @@ function injectUiStyles(): void {
   background: rgba(31, 51, 71, 0.92);
   border-color: ${PALETTE.OUTLINE};
   box-shadow: inset 0 0 0 1px ${PALETTE.LAB_CYAN};
-  font-size: 12px;
-  padding: 7px 12px;
+  font-size: 11px;
+  padding: 7px 11px;
 }
 
 .kf-menu-item.variant-danger {
@@ -333,7 +354,7 @@ function injectUiStyles(): void {
   gap: 8px;
   flex-shrink: 0;
   color: ${PALETTE.SNOW_LIGHT};
-  font-size: 12px;
+  font-size: 11px;
 }
 
 .kf-slider-track {
@@ -372,7 +393,7 @@ function injectUiStyles(): void {
 }
 
 .kf-stat-value {
-  font-size: 16px;
+  font-size: 15px;
   font-weight: 900;
   color: ${PALETTE.BELLY_WHITE};
 }
@@ -381,8 +402,8 @@ function injectUiStyles(): void {
   display: inline-flex;
   align-items: center;
   justify-content: center;
-  padding: 5px 10px;
-  font-size: 12px;
+  padding: 4px 9px;
+  font-size: 11px;
   font-weight: 900;
   letter-spacing: 1px;
   border: 2px solid ${PALETTE.OUTLINE};
@@ -400,11 +421,11 @@ function injectUiStyles(): void {
 }
 
 .kf-footer {
-  margin-top: 4px;
-  padding: 6px 12px;
-  background: rgba(19, 18, 58, 0.86);
+  margin-top: 2px;
+  padding: 5px 10px;
+  background: rgba(19, 18, 58, 0.88);
   border: 2px solid ${PALETTE.OUTLINE};
-  font-size: 11px;
+  font-size: 10.5px;
   font-weight: 700;
   color: ${PALETTE.SNOW_LIGHT};
   text-align: center;
@@ -428,9 +449,9 @@ function injectUiStyles(): void {
   top: 8px;
   right: 8px;
   bottom: 8px;
-  width: min(292px, 92vw);
+  width: min(300px, 92vw);
   z-index: 40;
-  background: rgba(19, 18, 58, 0.94);
+  background: rgba(19, 18, 58, 0.95);
   border: 3px solid ${PALETTE.OUTLINE};
   box-shadow:
     inset 0 0 0 2px ${PALETTE.LAB_CYAN},
@@ -442,7 +463,7 @@ function injectUiStyles(): void {
   flex-direction: column;
   overflow-y: auto;
   padding: 10px;
-  gap: 10px;
+  gap: 9px;
   pointer-events: auto;
 }
 
@@ -502,7 +523,7 @@ function injectUiStyles(): void {
 }
 
 .kf-drawer-btn {
-  padding: 6px 6px;
+  padding: 6px 5px;
   background: ${PALETTE.CLIFF_DARK};
   color: ${PALETTE.BELLY_WHITE};
   border: 2px solid ${PALETTE.OUTLINE};
@@ -526,13 +547,31 @@ function injectUiStyles(): void {
 .kf-drawer-btn.is-danger {
   background: ${PALETTE.KRUNKED_SCARF_DARK};
 }
+
+.kf-drawer-btn.is-accent {
+  background: ${PALETTE.LAB_WALL};
+  border-color: ${PALETTE.LAB_CYAN};
+  color: ${PALETTE.LAB_CYAN};
+}
 `;
   document.head.appendChild(style);
 }
 
+const RETURNABLE_META_SCREENS: ReadonlySet<MenuScreen> = new Set([
+  'options',
+  'assist_menu',
+  'skin_closet',
+  'album',
+  'manual',
+  'jukebox',
+  'achievements',
+  'controls_remap',
+]);
+
 export class MenuManager {
   private readonly container: HTMLElement;
   private readonly callbacks: MenuCallbacks;
+  private readonly metaScreens: MetaScreens;
 
   private readonly uiRoot: HTMLDivElement;
   private readonly drawerRoot: HTMLDivElement;
@@ -540,22 +579,22 @@ export class MenuManager {
 
   private screen: MenuScreen = 'title';
   private returnScreen: MenuScreen = 'title';
+  private controlsReturnScreen: MenuScreen = 'options';
   private selectedIndex = 0;
   private currentItems: MenuItemDef[] = [];
   private currentItemElements: HTMLButtonElement[] = [];
 
   private drawerOpen = false;
-  private drawerBuiltMode: GameMode | null = null;
+  private drawerBuilt = false;
   private drawerTelemetryEls: Record<string, HTMLElement> = {};
   private drawerAssistBtns: Partial<Record<keyof AssistSettings, HTMLButtonElement>> = {};
   private drawerFpsBtns: Partial<Record<TargetFps, HTMLButtonElement>> = {};
   private drawerPackBtn: HTMLButtonElement | null = null;
 
-  private onlineChannelInputValue = 'krunked-coop-1';
   private lastCtx: MenuRenderContext | null = null;
   private disposed = false;
 
-  constructor(container: HTMLElement, callbacks: MenuCallbacks) {
+  constructor(container: HTMLElement, callbacks: MenuCallbacks, artProvider?: MetaArtProvider) {
     this.container = container;
     this.callbacks = callbacks;
 
@@ -566,13 +605,36 @@ export class MenuManager {
     this.uiRoot.className = 'kf-ui-root screen-title';
     this.container.appendChild(this.uiRoot);
 
+    this.metaScreens = new MetaScreens(
+      this.container,
+      {
+        onBack: () => this.handleBackAction(),
+        onSetScreen: (screen) => this.callbacks.onSetScreen(screen),
+        onStartMode: (mode, ttIndex) => this.callbacks.onStartMode(mode, ttIndex),
+        onPlayAgain: () => this.callbacks.onPlayAgain(),
+        onQuitToTitle: () => this.callbacks.onQuitToTitle(),
+        onUpdateSave: (mutator) => this.callbacks.onUpdateSave(mutator),
+        onOpenOnlineCoop: (role, ch) => this.callbacks.onOpenOnlineCoop(role, ch),
+        onCreateWebRtcOffer: () => this.callbacks.onCreateWebRtcOffer(),
+        onAcceptWebRtcAnswer: (code) => this.callbacks.onAcceptWebRtcAnswer(code),
+        onAcceptWebRtcOffer: (code) => this.callbacks.onAcceptWebRtcOffer(code),
+        onDisconnectOnline: () => this.callbacks.onDisconnectOnline(),
+        onTriggerEmote: (who, emote) => this.callbacks.onTriggerEmote(who, emote),
+        onUnlockAudio: () => this.callbacks.onUnlockAudio(),
+        onUiSound: (kind) => this.callbacks.onUiSound(kind),
+        onRequestRerender: () => {
+          if (this.lastCtx) this.render(this.lastCtx);
+        },
+      },
+      artProvider,
+    );
+
     this.drawerRoot = document.createElement('div');
     this.drawerRoot.id = 'krunked-dev-drawer';
     this.drawerRoot.className = 'kf-dev-drawer is-hidden';
     this.drawerRoot.dataset.open = 'false';
     this.container.appendChild(this.drawerRoot);
 
-    // Hidden folder picker for runtime custom art pack loading
     this.folderInput = document.createElement('input');
     this.folderInput.type = 'file';
     this.folderInput.multiple = true;
@@ -589,6 +651,10 @@ export class MenuManager {
     this.container.appendChild(this.folderInput);
   }
 
+  setMetaArtProvider(provider: MetaArtProvider | null): void {
+    this.metaScreens.setArtProvider(provider);
+  }
+
   getScreen(): MenuScreen {
     return this.screen;
   }
@@ -597,18 +663,49 @@ export class MenuManager {
     return this.drawerOpen;
   }
 
+  isCapturingKey(): boolean {
+    return this.metaScreens.isCapturingKey();
+  }
+
+  showToast(toast: ToastNotification): void {
+    this.metaScreens.showToast(toast);
+  }
+
+  updateOnlineHud(status: OnlineCoopStatusSnapshot): void {
+    this.metaScreens.updateOnlineHud(status, this.screen);
+  }
+
+  toggleEmoteWheel(who: 'p1' | 'p2' = 'p1'): void {
+    if (this.screen !== 'playing') return;
+    this.metaScreens.toggleEmoteWheel(who);
+  }
+
+  closeEmoteWheel(): void {
+    this.metaScreens.closeEmoteWheel();
+  }
+
   setScreen(screen: MenuScreen, ctx: MenuRenderContext): void {
-    if (screen === 'options' || screen === 'assist_menu') {
+    if (screen === 'controls_remap') {
+      if (this.screen === 'options' || this.screen === 'paused' || this.screen === 'title') {
+        this.controlsReturnScreen = this.screen;
+      }
+    } else if (RETURNABLE_META_SCREENS.has(screen)) {
       if (this.screen === 'paused' || this.screen === 'title') {
         this.returnScreen = this.screen;
       }
     } else if (screen === 'title') {
       this.returnScreen = 'title';
+      this.controlsReturnScreen = 'options';
     }
+
     const screenChanged = this.screen !== screen;
     this.screen = screen;
+    if (screen !== 'playing') {
+      this.metaScreens.closeEmoteWheel();
+    }
     if (screenChanged) {
       this.selectedIndex = 0;
+      this.metaScreens.resetScreenFocus(screen, ctx.glyphStyle);
     }
     this.render(ctx);
   }
@@ -619,15 +716,17 @@ export class MenuManager {
     this.drawerRoot.classList.toggle('is-hidden', !next);
     this.drawerRoot.dataset.open = next ? 'true' : 'false';
     if (next) {
-      this.ensureDrawerBuilt(ctx);
+      this.ensureDrawerBuilt();
       this.updateDrawerTelemetry(ctx);
     }
   }
 
   render(ctx: MenuRenderContext): void {
     this.lastCtx = ctx;
+    this.metaScreens.updateOnlineHud(ctx.onlineStatus, this.screen);
+
     if (this.drawerOpen) {
-      this.ensureDrawerBuilt(ctx);
+      this.ensureDrawerBuilt();
       this.updateDrawerTelemetry(ctx);
     }
 
@@ -657,9 +756,10 @@ export class MenuManager {
 
   updateDrawerTelemetry(ctx: MenuRenderContext): void {
     this.lastCtx = ctx;
+    this.metaScreens.updateOnlineHud(ctx.onlineStatus, this.screen);
     if (!this.drawerOpen) return;
-    if (this.drawerBuiltMode !== ctx.simState.mode) {
-      this.ensureDrawerBuilt(ctx);
+    if (!this.drawerBuilt) {
+      this.ensureDrawerBuilt();
     }
     const setText = (key: string, val: string) => {
       const el = this.drawerTelemetryEls[key];
@@ -678,6 +778,7 @@ export class MenuManager {
       'input',
       `Pads: ${ctx.metrics.gamepadCount} | Touch: ${ctx.metrics.touchVisible ? 'ON' : 'OFF'}`,
     );
+    setText('online', ctx.onlineStatus.summaryString.toUpperCase());
 
     const assistKeys: (keyof AssistSettings)[] = [
       'infiniteJumps',
@@ -702,6 +803,10 @@ export class MenuManager {
 
   handleNavAction(action: MenuNavAction, ctx: MenuRenderContext): void {
     this.lastCtx = ctx;
+    if (this.metaScreens.isCapturingKey()) {
+      return;
+    }
+
     if (action === 'toggle_drawer') {
       this.toggleDrawer(undefined, ctx);
       this.callbacks.onUiSound('toggle');
@@ -709,10 +814,27 @@ export class MenuManager {
     }
 
     if (this.screen === 'playing') {
+      if (this.metaScreens.isEmoteWheelOpen()) {
+        this.metaScreens.handleEmoteWheelNav(action);
+        return;
+      }
       if (action === 'pause') {
         this.callbacks.onUiSound('toggle');
         this.callbacks.onSetScreen('paused');
+        return;
       }
+      if (action === 'tab_next') {
+        const who: 'p1' | 'p2' =
+          ctx.onlineStatus.active && ctx.onlineStatus.role === 'client' ? 'p2' : 'p1';
+        this.metaScreens.toggleEmoteWheel(who);
+        this.callbacks.onUiSound('toggle');
+        return;
+      }
+      return;
+    }
+
+    if (this.metaScreens.isManagedScreen(this.screen)) {
+      this.metaScreens.handleNavAction(this.screen, action, this.toMetaContext(ctx));
       return;
     }
 
@@ -762,15 +884,22 @@ export class MenuManager {
   }
 
   private handleBackAction(): void {
+    this.metaScreens.cancelKeyCapture();
     if (this.screen === 'paused') {
       this.callbacks.onUiSound('confirm');
       this.callbacks.onResume();
-    } else if (this.screen === 'options' || this.screen === 'assist_menu') {
+    } else if (this.screen === 'controls_remap') {
+      this.callbacks.onUiSound('cancel');
+      this.callbacks.onSetScreen(this.controlsReturnScreen);
+    } else if (RETURNABLE_META_SCREENS.has(this.screen)) {
       this.callbacks.onUiSound('cancel');
       this.callbacks.onSetScreen(this.returnScreen);
     } else if (this.screen === 'time_trials' || this.screen === 'online_lobby') {
       this.callbacks.onUiSound('cancel');
       this.callbacks.onSetScreen('play_menu');
+    } else if (this.screen === 'victory') {
+      this.callbacks.onUiSound('cancel');
+      this.callbacks.onQuitToTitle();
     } else if (this.screen !== 'title') {
       this.callbacks.onUiSound('cancel');
       this.callbacks.onSetScreen('title');
@@ -800,22 +929,57 @@ export class MenuManager {
     card.className = 'kf-title-card';
 
     const packActive = ctx.metrics.packSource === 'custom';
+    const trackMeta = JUKEBOX_TRACK_CATALOG[ctx.save.audio.jukeboxTrack];
     const items: MenuItemDef[] = [
       {
         id: 'title-play',
-        label: 'PLAY',
+        label: 'PLAY EXPEDITION',
+        sublabel: 'Co-Op • Solo Jeff • AI Fred • Lab DLC • Time Trials • Online P2P',
         variant: 'primary',
         onActivate: () => this.callbacks.onSetScreen('play_menu'),
       },
       {
+        id: 'title-skins',
+        label: 'SKIN CLOSET',
+        valueText: `${ctx.save.skins.p1} / ${ctx.save.skins.p2}`,
+        onActivate: () => this.callbacks.onSetScreen('skin_closet'),
+      },
+      {
+        id: 'title-album',
+        label: 'POLAROID ALBUM',
+        valueText: `${ctx.save.unlockedPhotos.length} / ${CATALOG_COUNTS.PHOTOS}`,
+        onActivate: () => this.callbacks.onSetScreen('album'),
+      },
+      {
+        id: 'title-manual',
+        label: 'FIELD MANUAL',
+        valueText: `${ctx.save.unlockedManual.length} / ${CATALOG_COUNTS.MANUAL_PAGES}`,
+        onActivate: () => this.callbacks.onSetScreen('manual'),
+      },
+      {
+        id: 'title-jukebox',
+        label: 'VILLAGE JUKEBOX',
+        valueText: trackMeta ? trackMeta.id : ctx.save.audio.jukeboxTrack,
+        onActivate: () => this.callbacks.onSetScreen('jukebox'),
+      },
+      {
+        id: 'title-achievements',
+        label: 'ACHIEVEMENTS',
+        valueText: `${ctx.save.unlockedAchievements.length} / ${CATALOG_COUNTS.ACHIEVEMENTS}`,
+        onActivate: () => this.callbacks.onSetScreen('achievements'),
+      },
+      {
         id: 'title-assist',
         label: 'ASSIST MODE',
-        valueText: this.countActiveAssists(ctx.save.assist) > 0 ? `${this.countActiveAssists(ctx.save.assist)} ON` : 'OFF',
+        valueText:
+          this.countActiveAssists(ctx.save.assist) > 0
+            ? `${this.countActiveAssists(ctx.save.assist)} ON`
+            : 'OFF',
         onActivate: () => this.callbacks.onSetScreen('assist_menu'),
       },
       {
         id: 'title-options',
-        label: 'OPTIONS',
+        label: 'OPTIONS & CONTROLS',
         onActivate: () => this.callbacks.onSetScreen('options'),
       },
       {
@@ -851,9 +1015,18 @@ export class MenuManager {
     const panel = document.createElement('div');
     panel.className = 'kf-panel';
 
+    if (this.metaScreens.isManagedScreen(this.screen)) {
+      this.metaScreens.renderScreen(this.screen, panel, this.toMetaContext(ctx));
+      const footer = document.createElement('div');
+      footer.className = 'kf-footer';
+      footer.textContent = getFooterPrompt(ctx.glyphStyle, this.screen);
+      panel.appendChild(footer);
+      this.uiRoot.appendChild(panel);
+      return;
+    }
+
     const titleEl = document.createElement('div');
     titleEl.className = 'kf-panel-title';
-
     let items: MenuItemDef[] = [];
 
     switch (this.screen) {
@@ -883,19 +1056,19 @@ export class MenuManager {
           {
             id: 'mode-lab',
             label: 'Laboratory DLC',
-            sublabel: 'Circuits, Tronchos, Lasers & Mech Boss',
+            sublabel: 'Circuits, Tronchos, Lasers & Mech-Boss Bachicha',
             onActivate: () => this.callbacks.onStartMode('lab_dlc'),
           },
           {
             id: 'mode-tt',
-            label: 'Time Trials (10)',
-            sublabel: 'Beat Bronze, Silver, Gold & Platinum par times',
+            label: 'Time Trials (TT1–TT10)',
+            sublabel: 'Beat Bronze, Silver, Gold & Platinum medal times',
             onActivate: () => this.callbacks.onSetScreen('time_trials'),
           },
           {
             id: 'mode-online',
             label: 'Online P2P Co-Op',
-            sublabel: 'Host or join a shared room channel',
+            sublabel: 'Instant Dual-Tab BroadcastChannel or WebRTC Room Code P2P',
             onActivate: () => this.callbacks.onSetScreen('online_lobby'),
           },
           {
@@ -907,81 +1080,13 @@ export class MenuManager {
         break;
       }
 
-      case 'time_trials': {
-        titleEl.textContent = 'TIME TRIALS (10)';
-        panel.appendChild(titleEl);
-        items = [
-          ...TIME_TRIAL_MEDALS.map((tt) => {
-            const best = ctx.save.timeTrialBest[tt.id];
-            return {
-              id: `tt-${tt.id}`,
-              label: `${tt.id}: ${tt.name}`,
-              sublabel: `Zone: ${tt.biome.toUpperCase()} • Gold ${tt.gold}s • Plat ${tt.platinum}s`,
-              valueText: best
-                ? `${formatTime(best.timeSec)} (${best.medal.toUpperCase()})`
-                : 'UNPLAYED',
-              onActivate: () => this.callbacks.onStartMode('time_trial', tt.index),
-            };
-          }),
-          {
-            id: 'tt-back',
-            label: 'Back',
-            onActivate: () => this.callbacks.onSetScreen('play_menu'),
-          },
-        ];
-        break;
-      }
-
-      case 'online_lobby': {
-        titleEl.textContent = 'ONLINE P2P CO-OP';
-        panel.appendChild(titleEl);
-
-        const note = document.createElement('div');
-        note.className = 'kf-panel-note';
-        note.textContent = `Status: ${ctx.metrics.onlineState || 'offline'}. Enter a room channel and choose Host or Join.`;
-        panel.appendChild(note);
-
-        const input = document.createElement('input');
-        input.className = 'kf-online-input';
-        input.type = 'text';
-        input.value = this.onlineChannelInputValue;
-        input.maxLength = 32;
-        input.placeholder = 'Room channel name...';
-        input.addEventListener('input', () => {
-          this.onlineChannelInputValue = input.value.trim() || 'krunked-coop-1';
-        });
-        panel.appendChild(input);
-
-        items = [
-          {
-            id: 'online-host',
-            label: 'Host Co-Op Room (P1 Krunked)',
-            variant: 'primary',
-            onActivate: () =>
-              this.callbacks.onOpenOnlineCoop('host', this.onlineChannelInputValue),
-          },
-          {
-            id: 'online-join',
-            label: 'Join Co-Op Room (P2 Fred)',
-            onActivate: () =>
-              this.callbacks.onOpenOnlineCoop('client', this.onlineChannelInputValue),
-          },
-          {
-            id: 'online-back',
-            label: 'Back',
-            onActivate: () => this.callbacks.onSetScreen('play_menu'),
-          },
-        ];
-        break;
-      }
-
       case 'paused': {
         titleEl.textContent = 'PAUSED';
         panel.appendChild(titleEl);
         items = [
           {
             id: 'pause-resume',
-            label: 'Resume',
+            label: 'Resume Climb',
             variant: 'primary',
             onActivate: () => this.callbacks.onResume(),
           },
@@ -989,6 +1094,41 @@ export class MenuManager {
             id: 'pause-respawn',
             label: 'Respawn at Base',
             onActivate: () => this.callbacks.onRespawnAtBase(),
+          },
+          {
+            id: 'pause-skins',
+            label: 'Skin Closet',
+            valueText: `${ctx.save.skins.p1} / ${ctx.save.skins.p2}`,
+            onActivate: () => this.callbacks.onSetScreen('skin_closet'),
+          },
+          {
+            id: 'pause-album',
+            label: 'Polaroid Album',
+            valueText: `${ctx.save.unlockedPhotos.length} / ${CATALOG_COUNTS.PHOTOS}`,
+            onActivate: () => this.callbacks.onSetScreen('album'),
+          },
+          {
+            id: 'pause-manual',
+            label: 'Field Manual',
+            valueText: `${ctx.save.unlockedManual.length} / ${CATALOG_COUNTS.MANUAL_PAGES}`,
+            onActivate: () => this.callbacks.onSetScreen('manual'),
+          },
+          {
+            id: 'pause-jukebox',
+            label: 'Jukebox',
+            valueText: ctx.save.audio.jukeboxTrack,
+            onActivate: () => this.callbacks.onSetScreen('jukebox'),
+          },
+          {
+            id: 'pause-achievements',
+            label: 'Achievements',
+            valueText: `${ctx.save.unlockedAchievements.length} / ${CATALOG_COUNTS.ACHIEVEMENTS}`,
+            onActivate: () => this.callbacks.onSetScreen('achievements'),
+          },
+          {
+            id: 'pause-controls',
+            label: 'Controls & Gamepad Remap',
+            onActivate: () => this.callbacks.onSetScreen('controls_remap'),
           },
           {
             id: 'pause-assist',
@@ -1046,6 +1186,13 @@ export class MenuManager {
         };
 
         items = [
+          {
+            id: 'opt-controls-remap',
+            label: 'Controls & Gamepad Remap',
+            sublabel: 'Interactive key rebinding + Xbox/PS/Switch/Tesla pad map',
+            variant: 'primary',
+            onActivate: () => this.callbacks.onSetScreen('controls_remap'),
+          },
           {
             id: 'opt-fps',
             label: 'Target FPS',
@@ -1243,211 +1390,9 @@ export class MenuManager {
         break;
       }
 
-      case 'victory': {
-        const st = ctx.simState;
-        const isLab = st.mode === 'lab_dlc';
-        const isTT = st.mode === 'time_trial';
-        titleEl.textContent = isTT
-          ? 'TIME TRIAL COMPLETE!'
-          : isLab
-            ? 'LABORATORY CLEARED!'
-            : 'SUMMIT REACHED!';
-        panel.appendChild(titleEl);
-
-        const badgeRow = document.createElement('div');
-        badgeRow.style.display = 'flex';
-        badgeRow.style.gap = '8px';
-        badgeRow.style.flexWrap = 'wrap';
-
-        const noAssist = !st.assistEverUsedInRun;
-        const noAssistBadge = document.createElement('div');
-        noAssistBadge.className = noAssist ? 'kf-badge kf-badge-gold' : 'kf-badge kf-badge-muted';
-        noAssistBadge.textContent = noAssist ? '★ NO-ASSIST CLEAR ★' : 'ASSIST MODE USED';
-        badgeRow.appendChild(noAssistBadge);
-
-        if (isTT && st.completionMedal !== 'none') {
-          const medalBadge = document.createElement('div');
-          medalBadge.className = 'kf-badge kf-badge-gold';
-          medalBadge.textContent = `${st.completionMedal.toUpperCase()} MEDAL`;
-          badgeRow.appendChild(medalBadge);
-        }
-        panel.appendChild(badgeRow);
-
-        const statsGrid = document.createElement('div');
-        statsGrid.className = 'kf-stats-grid';
-        const runTime = st.completionTimeSec > 0 ? st.completionTimeSec : st.elapsedSec;
-        const stats: Array<[string, string]> = [
-          ['Run Time', formatTime(runTime)],
-          ['Max Altitude', `${st.maxAltitude.toFixed(1)} m`],
-          ['Jumps', String(st.jumpsCount)],
-          ['Falls', String(st.fallsCount)],
-        ];
-        for (const [label, value] of stats) {
-          const box = document.createElement('div');
-          box.className = 'kf-stat-box';
-          const lbl = document.createElement('div');
-          lbl.className = 'kf-stat-label';
-          lbl.textContent = label;
-          const val = document.createElement('div');
-          val.className = 'kf-stat-value';
-          val.textContent = value;
-          box.appendChild(lbl);
-          box.appendChild(val);
-          statsGrid.appendChild(box);
-        }
-        panel.appendChild(statsGrid);
-
-        items = [
-          {
-            id: 'victory-again',
-            label: 'Play Again',
-            variant: 'primary',
-            onActivate: () => this.callbacks.onPlayAgain(),
-          },
-          {
-            id: 'victory-title',
-            label: 'Title',
-            onActivate: () => this.callbacks.onQuitToTitle(),
-          },
-        ];
-        break;
-      }
-
-      case 'skin_closet': {
-        titleEl.textContent = 'SKIN CLOSET';
-        panel.appendChild(titleEl);
-        const s = ctx.save.skins;
-        const cycleSkin = <T extends string>(
-          list: readonly T[],
-          cur: T,
-          dir: -1 | 1,
-          apply: (next: T) => void,
-        ) => {
-          const idx = list.indexOf(cur);
-          const next = list[(idx + dir + list.length) % list.length];
-          apply(next);
-        };
-        items = [
-          {
-            id: 'skin-p1',
-            label: 'Krunked (P1) Skin',
-            valueText: s.p1,
-            onActivate: () =>
-              cycleSkin(COOP_SKINS, s.p1, 1, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.p1 = next;
-                }),
-              ),
-            onStep: (dir) =>
-              cycleSkin(COOP_SKINS, s.p1, dir, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.p1 = next;
-                }),
-              ),
-          },
-          {
-            id: 'skin-p2',
-            label: 'Fred (P2) Skin',
-            valueText: s.p2,
-            onActivate: () =>
-              cycleSkin(COOP_SKINS, s.p2, 1, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.p2 = next;
-                }),
-              ),
-            onStep: (dir) =>
-              cycleSkin(COOP_SKINS, s.p2, dir, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.p2 = next;
-                }),
-              ),
-          },
-          {
-            id: 'skin-jeff',
-            label: 'Jeff Skin',
-            valueText: s.jeff,
-            onActivate: () =>
-              cycleSkin(JEFF_SKINS, s.jeff, 1, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.jeff = next;
-                }),
-              ),
-            onStep: (dir) =>
-              cycleSkin(JEFF_SKINS, s.jeff, dir, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.jeff = next;
-                }),
-              ),
-          },
-          {
-            id: 'skin-rope',
-            label: 'Rope Skin',
-            valueText: s.rope,
-            onActivate: () =>
-              cycleSkin(ROPE_SKINS, s.rope, 1, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.rope = next;
-                }),
-              ),
-            onStep: (dir) =>
-              cycleSkin(ROPE_SKINS, s.rope, dir, (next) =>
-                this.callbacks.onUpdateSave((d) => {
-                  d.skins.rope = next;
-                }),
-              ),
-          },
-          {
-            id: 'skin-back',
-            label: 'Back',
-            onActivate: () => this.callbacks.onSetScreen('title'),
-          },
-        ];
-        break;
-      }
-
-      case 'jukebox': {
-        titleEl.textContent = 'VILLAGE JUKEBOX';
-        panel.appendChild(titleEl);
-        items = [
-          ...JUKEBOX_TRACKS.map((track) => ({
-            id: `jb-${track}`,
-            label: track,
-            valueText: ctx.save.audio.jukeboxTrack === track ? 'PLAYING' : '',
-            onActivate: () =>
-              this.callbacks.onUpdateSave((d) => {
-                d.audio.jukeboxTrack = track;
-              }),
-          })),
-          {
-            id: 'jb-back',
-            label: 'Back',
-            onActivate: () => this.callbacks.onSetScreen('title'),
-          },
-        ];
-        break;
-      }
-
       default: {
-        // album, manual, achievements, controls_remap fallback view
-        const labelMap: Record<string, string> = {
-          album: `PHOTO ALBUM (${ctx.save.unlockedPhotos.length}/12)`,
-          manual: `CLIMBER MANUAL (${ctx.save.unlockedManual.length}/7)`,
-          achievements: `ACHIEVEMENTS (${ctx.save.unlockedAchievements.length}/26)`,
-          controls_remap: 'CONTROLS & KEYBINDS',
-        };
-        titleEl.textContent = labelMap[this.screen] ?? this.screen.toUpperCase();
+        titleEl.textContent = this.screen.toUpperCase();
         panel.appendChild(titleEl);
-
-        const info = document.createElement('div');
-        info.className = 'kf-panel-note';
-        if (this.screen === 'controls_remap') {
-          const kb = ctx.save.keybinds;
-          info.textContent = `P1: ${kb.p1Left}/${kb.p1Right} Move, ${kb.p1Jump} Jump, ${kb.p1Grab} Grab, ${kb.p1Anchor} Anchor, ${kb.p1Pull} Pull | P2: ${kb.p2Left}/${kb.p2Right} Move, ${kb.p2Jump} Jump, ${kb.p2Grab} Grab, ${kb.p2Anchor} Anchor, ${kb.p2Pull} Pull | Flag: ${kb.flag}, Charlie: ${kb.charlie}, Emote: ${kb.emote}`;
-        } else {
-          info.textContent = 'Explore the mountain to unlock collectibles, pages, and trophies.';
-        }
-        panel.appendChild(info);
-
         items = [
           {
             id: 'sub-back',
@@ -1468,6 +1413,16 @@ export class MenuManager {
     panel.appendChild(footer);
 
     this.uiRoot.appendChild(panel);
+  }
+
+  private toMetaContext(ctx: MenuRenderContext): MetaRenderContext {
+    return {
+      save: ctx.save,
+      simState: ctx.simState,
+      glyphStyle: ctx.glyphStyle,
+      onlineStatus: ctx.onlineStatus,
+      returnScreen: this.returnScreen,
+    };
   }
 
   private buildItemList(items: MenuItemDef[]): HTMLDivElement {
@@ -1573,11 +1528,11 @@ export class MenuManager {
     });
   }
 
-  private ensureDrawerBuilt(ctx: MenuRenderContext): void {
-    if (this.drawerBuiltMode === ctx.simState.mode && this.drawerRoot.childElementCount > 0) {
+  private ensureDrawerBuilt(): void {
+    if (this.drawerBuilt && this.drawerRoot.childElementCount > 0) {
       return;
     }
-    this.drawerBuiltMode = ctx.simState.mode;
+    this.drawerBuilt = true;
     this.drawerRoot.innerHTML = '';
     this.drawerTelemetryEls = {};
     this.drawerAssistBtns = {};
@@ -1612,6 +1567,7 @@ export class MenuManager {
       ['hash', 'FNV1A', false],
       ['alt', 'ALT', true],
       ['input', 'INPUT', true],
+      ['online', 'NET', true],
     ];
     for (const [key, label, wide] of metricRows) {
       const cell = document.createElement('div');
@@ -1629,7 +1585,7 @@ export class MenuManager {
     metricsSec.appendChild(metricsGrid);
     this.drawerRoot.appendChild(metricsSec);
 
-    // Zone Warp Buttons
+    // Zone Warp Buttons (Always includes Village, Foothills, Mines, Crags, Summit, LAB, BOSS)
     const warpSec = document.createElement('div');
     warpSec.className = 'kf-drawer-section';
     warpSec.appendChild(this.makeDrawerHeading('Zone Warp'));
@@ -1641,19 +1597,38 @@ export class MenuManager {
       ['mines', 'Mines'],
       ['crags', 'Crags'],
       ['summit', 'Summit'],
+      ['lab', 'LAB'],
+      ['boss', 'BOSS'],
     ];
-    if (ctx.simState.mode === 'lab_dlc') {
-      zones.push(['lab', 'Lab'], ['boss', 'Boss']);
-    }
     for (const [zoneId, label] of zones) {
-      warpGrid.appendChild(
-        this.makeDrawerBtn(label, () => {
-          this.callbacks.onWarpToZone(zoneId);
-        }),
-      );
+      const btn = this.makeDrawerBtn(label, () => {
+        this.callbacks.onWarpToZone(zoneId);
+      });
+      if (zoneId === 'lab' || zoneId === 'boss') {
+        btn.classList.add('is-accent');
+      }
+      warpGrid.appendChild(btn);
     }
     warpSec.appendChild(warpGrid);
     this.drawerRoot.appendChild(warpSec);
+
+    // Boss & Time Trial Quick Playtest Actions
+    const quickSec = document.createElement('div');
+    quickSec.className = 'kf-drawer-section';
+    quickSec.appendChild(this.makeDrawerHeading('Boss & Trial Quick Actions'));
+    const quickGrid = document.createElement('div');
+    quickGrid.className = 'kf-drawer-btn-grid';
+    const breakChainBtn = this.makeDrawerBtn('BREAK BOSS CHAIN', () => {
+      this.callbacks.onBreakBossChain();
+    });
+    breakChainBtn.classList.add('is-danger');
+    const tt1Btn = this.makeDrawerBtn('TT1 QUICK LAUNCH', () => {
+      this.callbacks.onStartMode('time_trial', 1);
+    });
+    tt1Btn.classList.add('is-accent');
+    quickGrid.append(breakChainBtn, tt1Btn);
+    quickSec.appendChild(quickGrid);
+    this.drawerRoot.appendChild(quickSec);
 
     // Assist Quick Toggles
     const assistSec = document.createElement('div');
@@ -1754,6 +1729,7 @@ export class MenuManager {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.metaScreens.dispose();
     this.uiRoot.remove();
     this.drawerRoot.remove();
     this.folderInput.remove();
