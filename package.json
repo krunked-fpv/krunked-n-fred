@@ -1,0 +1,30 @@
+{
+  "name": "krunked-n-fred",
+  "private": true,
+  "version": "1.0.0",
+  "type": "module",
+  "description": "Krunked & Fred — 480x270 pixel-art 50 Hz rope-tethered co-op precision platformer",
+  "scripts": {
+    "extract": "tsx tools/extract-assets.ts",
+    "oracle": "tsx tools/oracle-dump.ts",
+    "dev": "vite --port 5173 --strictPort",
+    "play": "vite --port 5173 --strictPort",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "verify:assets": "tsx scripts/verify/verify-assets.ts",
+    "verify:sim": "tsx scripts/verify/verify-sim.ts",
+    "verify": "npm run typecheck && npm run test && npm run verify:assets && npm run verify:sim",
+    "build": "vite build",
+    "export:dna": "tsx export-dna.ts"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.0",
+    "tsx": "^4.19.2",
+    "typescript": "^5.7.2",
+    "vite": "^6.0.5",
+    "vitest": "^2.1.8"
+  },
+  "dependencies": {
+    "krunked-n-fred": "file:"
+  }
+}

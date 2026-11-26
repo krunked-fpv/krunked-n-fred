@@ -1,0 +1,49 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  verify-and-build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Run unit and integration tests
+        run: npm run test
+
+      - name: Verify assets, oracle parity, and IP hygiene
+        run: npm run verify:assets
+
+      - name: Verify deterministic simulation and reachability soak
+        run: npm run verify:sim
+
+      - name: Build static bundle
+        run: npm run build
+
+      - name: Upload GitHub Pages artifact
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dist
