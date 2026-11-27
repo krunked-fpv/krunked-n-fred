@@ -1,5 +1,9 @@
 # Krunked & Fred
 
+[![Krunked & Fred CI & Deploy Pages](https://github.com/krunked-fpv/krunked-n-fred/actions/workflows/ci.yml/badge.svg)](https://github.com/krunked-fpv/krunked-n-fred/actions/workflows/ci.yml)
+
+**Play Live:** https://krunked-fpv.github.io/krunked-n-fred/
+
 A crisp `480 x 270` pixel-art, `50 Hz` deterministic rope-tethered co-op precision platformer built for the Krunked Foundry.
 
 Two chubby penguins—**Krunked** (crimson scarf) and **Fred** (emerald scarf)—are bound together by a taut `40 px` climbing rope as they scale perilous alpine peaks, dark minecart shafts, windswept crags, slick glacial summits, and a high-voltage subterranean Laboratory.
