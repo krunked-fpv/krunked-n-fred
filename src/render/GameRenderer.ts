@@ -50,7 +50,7 @@ const BIOME_DISPLAY: Record<BiomeId, { label: string; accent: string }> = {
   village: { label: 'VILLAGE', accent: PALETTE.PINE_MOSS },
   foothills: { label: 'FOOTHILLS', accent: PALETTE.ICE_LIGHT },
   mines: { label: 'DARK MINES', accent: PALETTE.BEAK_BRIGHT },
-  crags: { label: 'WIND CRAGS', accent: PALETTE.CLIFF_MID },
+  crags: { label: 'WINDY CRAGS', accent: PALETTE.CLIFF_MID },
   summit: { label: 'SUMMIT', accent: PALETTE.LAB_AMBER },
   lab: { label: 'LABORATORY', accent: PALETTE.LAB_CYAN },
   boss: { label: 'BOSS ARENA', accent: PALETTE.KRUNKED_SCARF },
@@ -382,7 +382,7 @@ export class GameRenderer implements RendererModulePort {
           }
           break;
         case 'achievement_unlock':
-          this.showToast(`UNLOCKED: ${ev.id}`, PALETTE.PINE_MOSS);
+          // Displayed cleanly via MenuManager's styled golden achievement card (avoids duplicate/overlapping toast)
           break;
         default:
           break;
@@ -2112,12 +2112,12 @@ export class GameRenderer implements RendererModulePort {
       });
     }
 
-    // 4. Bottom-Center: Discovery / Milestone Toast
+    // 4. Top-Center (below wind banner): Discovery / Milestone Toast (never overlaps bottom sign banners!)
     if (this.toastTimer > 0 && this.toastText.length > 0) {
       const fade = this.toastTimer < 0.45 ? this.toastTimer / 0.45 : 1;
       const tw = measurePixelText(this.toastText, 1).width + 16;
       const tx = Math.round(HALF_W - tw * 0.5);
-      const ty = H - 24;
+      const ty = state.windPhase === 'telegraph' || state.windPhase === 'active' || state.boss.active ? 26 : 10;
       ctx.globalAlpha = fade;
       drawPixelBox(ctx, tx, ty, tw, 15, 'rgba(19, 18, 58, 0.92)', PALETTE.OUTLINE, this.toastColor);
       drawPixelText(ctx, this.toastText, HALF_W, ty + 4, {

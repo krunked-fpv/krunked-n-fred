@@ -616,7 +616,7 @@ export class LabAndBossRenderer {
     if (!arena) return;
 
     const bossWorldX = (arena.minX + arena.maxX) * 0.5;
-    const bossWorldY = arena.minY + (arena.maxY - arena.minY) * 0.54;
+    const bossWorldY = arena.minY + (arena.maxY - arena.minY) * 0.34;
 
     const sx = toScreenX(bossWorldX, camX);
     const sy = toScreenY(bossWorldY, camY);
@@ -818,7 +818,7 @@ export class LabAndBossRenderer {
     if (!boss.active || boss.defeated || !arena) return;
 
     const bossWorldX = (arena.minX + arena.maxX) * 0.5;
-    const bossWorldY = arena.minY + (arena.maxY - arena.minY) * 0.54;
+    const bossWorldY = arena.minY + (arena.maxY - arena.minY) * 0.34;
 
     const sx = toScreenX(bossWorldX, camX);
     const sy = toScreenY(bossWorldY, camY) - 19;

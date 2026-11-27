@@ -57,11 +57,10 @@ function injectTouchStyles(): void {
   align-items: center;
   justify-content: center;
   flex-direction: column;
-  background: rgba(96, 88, 174, 0.94);
-  color: ${PALETTE.BELLY_WHITE};
-  border: 2px solid ${PALETTE.SNOW_LIGHT};
-  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.45), 0 2px 0 ${PALETTE.OUTLINE};
-  opacity: 0.28;
+  background: rgba(96, 88, 174, 0.28);
+  color: rgba(255, 255, 255, 0.88);
+  border: 2px solid rgba(203, 219, 252, 0.58);
+  box-shadow: inset 0 0 0 1px rgba(255, 255, 255, 0.28), 0 2px 0 rgba(34, 32, 52, 0.65);
   font-family: 'Courier New', Courier, monospace;
   font-weight: 700;
   letter-spacing: 0.5px;
@@ -69,14 +68,15 @@ function injectTouchStyles(): void {
   text-shadow: 1px 1px 0 ${PALETTE.OUTLINE}, -1px -1px 0 ${PALETTE.OUTLINE};
   cursor: pointer;
   touch-action: none;
-  transition: opacity 60ms linear, transform 60ms linear;
+  transition: background-color 60ms linear, transform 60ms linear, border-color 60ms linear;
 }
 
 .kf-touch-btn.is-pressed,
 .kf-touch-btn.is-latched {
-  opacity: 0.55;
   transform: translateY(1px);
-  background: rgba(109, 88, 183, 0.95);
+  background: rgba(126, 106, 206, 0.55);
+  color: ${PALETTE.BELLY_WHITE};
+  border-color: rgba(255, 255, 255, 0.88);
 }
 
 .kf-touch-btn.is-latched {

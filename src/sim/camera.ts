@@ -95,7 +95,10 @@ export function addCameraShake(camera: CameraState, mag: number, duration: numbe
  */
 export function snapCamera(state: SimState, level: LevelData): void {
   const mid = getFocusMidpoint(state);
-  const clamped = clampToLevelBounds(mid.x, mid.y + VERTICAL_BIAS, level);
+  const inBossArena =
+    level.bossArena !== undefined && mid.y >= level.bossArena.minY - 2;
+  const biasY = inBossArena ? VERTICAL_BIAS + 2.8 : VERTICAL_BIAS;
+  const clamped = clampToLevelBounds(mid.x, mid.y + biasY, level);
   state.camera.x = clamped.x;
   state.camera.y = clamped.y;
   state.camera.prevX = clamped.x;
@@ -116,10 +119,13 @@ export function updateCamera(state: SimState, level: LevelData, dt: number): voi
   cam.prevY = cam.y;
 
   const mid = getFocusMidpoint(state);
+  const inBossArena =
+    level.bossArena !== undefined && mid.y >= level.bossArena.minY - 2;
+  const biasY = inBossArena ? VERTICAL_BIAS + 2.8 : VERTICAL_BIAS;
   const lookX = clamp(mid.vx * LOOKAHEAD_X_FACTOR, -LOOKAHEAD_X_MAX, LOOKAHEAD_X_MAX);
   const lookY = clamp(mid.vy * LOOKAHEAD_Y_FACTOR, LOOKAHEAD_Y_MIN, LOOKAHEAD_Y_MAX);
 
-  const clampedTarget = clampToLevelBounds(mid.x + lookX, mid.y + VERTICAL_BIAS + lookY, level);
+  const clampedTarget = clampToLevelBounds(mid.x + lookX, mid.y + biasY + lookY, level);
   cam.targetX = clampedTarget.x;
   cam.targetY = clampedTarget.y;
 

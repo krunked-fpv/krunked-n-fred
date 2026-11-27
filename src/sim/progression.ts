@@ -172,7 +172,7 @@ export function updateProgression(
         ) {
           unlock('ReachPeakCoop');
         }
-        if (ev.noAssist) {
+        if (ev.noAssist && ev.mode !== 'time_trial') {
           unlock('GameCompletedNoAssist');
         }
         break;
