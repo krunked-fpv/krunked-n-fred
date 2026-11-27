@@ -1244,9 +1244,9 @@ export function buildSoloJeffLevel(): LevelData {
   wp.ledge(15.0, 6.0, 491);
 
   // --- 4E. Grand Solo Jeff Summit Flag & Celebration Plateau (Y = 497) ---
-  addDeck(b, 1, 493, 5, 'SNOW', 1); // Step 1 (topY = 493)
-  addDeck(b, -3, 495, 5, 'SNOW', 1); // Step 2 (topY = 495, strictly clear of 3..17 plateau!)
-  b.fillRect(3, 495, 14, 2, 'SNOW'); // Grand Solo Summit Plateau (topY = 497, X: 3..17)
+  addDeck(b, 0, 493, 5, 'SNOW', 1); // Step 1 (topY = 493, X=0..4 open sky clear of 4..17 plateau!)
+  addOneWayDeck(b, -3, 495, 5, 'PLATFORM'); // Step 2 (topY = 495 jump-through deck, 2u chute to plateau!)
+  b.fillRect(4, 495, 13, 2, 'SNOW'); // Grand Solo Summit Plateau (topY = 497, X: 4..17)
   b.fillIce(-5, 495, 2, 3);
   b.fillIce(17, 495, 2, 4);
 
@@ -1258,9 +1258,9 @@ export function buildSoloJeffLevel(): LevelData {
     text: 'Rock Solid! Krunked and Jeff the Rock conquered every cliff, cavern, gale, and glacier!',
   });
 
-  wp.ledge(4.5, 2.0, 493);
-  wp.ledge(0.5, 1.5, 495);
-  wp.ledge(4.0, 10.0, 497);
+  wp.ledge(3.8, 0.8, 493);
+  wp.ledge(0.2, 1.8, 495);
+  wp.ledge(4.8, 10.0, 497);
 
   b.addWaypoints(wp.points);
   return b.build();

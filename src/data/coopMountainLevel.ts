@@ -1287,23 +1287,23 @@ export function buildCoopMountainLevel(mode: GameMode = 'coop_mountain'): LevelD
   wp.ledge(2.0, 11.2, 492);
 
   // --- 4E. Grand Summit Flag & Celebration Plateau (Y = 498) ---
-  addDeck(b, 12, 494, 5, 'SNOW', 1); // Step 1 (topY = 494)
-  addDeck(b, 18, 496, 5, 'SNOW', 1); // Step 2 (topY = 496, strictly clear of 4..18 plateau!)
-  b.fillRect(4, 496, 14, 2, 'SNOW'); // Grand Celebration Plateau (topY = 498, X: 4..18)
+  addDeck(b, 14, 494, 6, 'SNOW', 1); // Step 1 (topY = 494, X=16..20 open sky clear of 4..16 plateau!)
+  addOneWayDeck(b, 18, 496, 5, 'PLATFORM'); // Step 2 (topY = 496 jump-through deck, 2u chute to plateau!)
+  b.fillRect(4, 496, 12, 2, 'SNOW'); // Grand Celebration Plateau (topY = 498, X: 4..16)
   b.fillIce(2, 496, 2, 4);
   b.fillIce(23, 496, 2, 3);
 
-  b.setSummitZone(8, WORLD.COOP_SUMMIT_Y, 6, 4, WORLD.COOP_SUMMIT_Y);
+  b.setSummitZone(7, WORLD.COOP_SUMMIT_Y, 6, 4, WORLD.COOP_SUMMIT_Y);
   b.addSign({
-    x: 15.5,
+    x: 14.5,
     y: 498.0,
     title: 'Mount Krunked Peak - 498m',
     text: 'Bravo Krunked & Fred! You conquered the Foothills, Dark Mines, Windy Crags, and Glacier Peak!',
   });
 
-  wp.ledge(13.0, 16.5, 494);
-  wp.ledge(19.0, 19.0, 496);
-  wp.ledge(17.0, 11.0, 498);
+  wp.ledge(14.5, 19.0, 494);
+  wp.ledge(19.5, 18.2, 496);
+  wp.ledge(15.2, 10.0, 498);
 
   b.addWaypoints(wp.points);
   return b.build();
